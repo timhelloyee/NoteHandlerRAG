@@ -1,0 +1,7 @@
+open_clip_torch
+torch
+chromadb
+langchain-google-genai
+google-genai
+python-dotenv
+Pillow
