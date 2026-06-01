@@ -1,0 +1,19 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Original notebook kept local only (contains hardcoded keys)
+NoteHandler.ipynb
+
+# Vector stores (regenerable data)
+vectorstores/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+env/
