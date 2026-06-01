@@ -5,3 +5,6 @@ langchain-google-genai
 google-genai
 python-dotenv
 Pillow
+fastapi
+uvicorn[standard]
+python-multipart
