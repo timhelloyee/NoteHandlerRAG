@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NoteHandlerRAG</title>
+  <style>
+    :root { font-family: system-ui, "Segoe UI", sans-serif; }
+    body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+    h1 { font-size: 1.5rem; }
+    section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1.25rem; }
+    label { font-weight: 600; display: block; margin-bottom: .25rem; }
+    input, textarea, button { font: inherit; }
+    input[type=text], textarea { width: 100%; padding: .5rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; }
+    textarea { min-height: 80px; resize: vertical; }
+    button { margin-top: .5rem; padding: .5rem 1rem; border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
+    button:disabled { background: #9bb4ee; cursor: default; }
+    #answer { white-space: pre-wrap; background: #f7f7f9; border-radius: 6px; padding: 1rem; margin-top: .75rem; min-height: 1rem; }
+    .row { display: flex; gap: .5rem; align-items: end; }
+    .muted { color: #666; font-size: .85rem; }
+    ul { padding-left: 1.1rem; }
+  </style>
+</head>
+<body>
+  <h1>NoteHandlerRAG</h1>
+
+  <section>
+    <label for="user">使用者 (user id)</label>
+    <input type="text" id="user" value="alice" placeholder="alice">
+    <p class="muted">每位使用者的筆記與資料庫是分開的。</p>
+  </section>
+
+  <section>
+    <label for="question">問問題</label>
+    <textarea id="question" placeholder="輸入問題，例如：輸出每一個科目統整後的筆記內容"></textarea>
+    <button id="askBtn">送出</button>
+    <div id="answer"></div>
+  </section>
+
+  <section>
+    <label for="file">上傳筆記 (.txt / .md / 圖片)</label>
+    <div class="row">
+      <input type="file" id="file" accept=".txt,.md,.jpg,.jpeg,.png,.webp,.gif">
+      <button id="uploadBtn">上傳</button>
+    </div>
+    <div id="uploadResult" class="muted"></div>
+  </section>
+
+  <section>
+    <label>已儲存的筆記</label>
+    <button id="refreshBtn">重新整理</button>
+    <ul id="notes"></ul>
+  </section>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const userId = () => $("user").value.trim() || "alice";
+
+    async function ask() {
+      const question = $("question").value.trim();
+      if (!question) return;
+      $("askBtn").disabled = true;
+      $("answer").textContent = "思考中…";
+      try {
+        const res = await fetch("/api/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId(), question, top_k: 10 }),
+        });
+        const data = await res.json();
+        $("answer").textContent = res.ok ? data.answer : ("錯誤：" + (data.detail || res.status));
+      } catch (e) {
+        $("answer").textContent = "請求失敗：" + e;
+      } finally {
+        $("askBtn").disabled = false;
+      }
+    }
+
+    async function upload() {
+      const file = $("file").files[0];
+      if (!file) return;
+      $("uploadBtn").disabled = true;
+      $("uploadResult").textContent = "上傳中…（圖片需呼叫 Gemini 產生描述，可能稍久）";
+      const fd = new FormData();
+      fd.append("user_id", userId());
+      fd.append("file", file);
+      try {
+        const res = await fetch("/api/upload", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) { $("uploadResult").textContent = "錯誤：" + (data.detail || res.status); }
+        else if (data.added === false) { $("uploadResult").textContent = data.id + " 已存在，跳過"; }
+        else { $("uploadResult").textContent = data.id + " 已加入" + (data.description ? "（描述：" + data.description.slice(0, 60) + "…）" : ""); }
+        loadNotes();
+      } catch (e) {
+        $("uploadResult").textContent = "上傳失敗：" + e;
+      } finally {
+        $("uploadBtn").disabled = false;
+      }
+    }
+
+    async function loadNotes() {
+      const res = await fetch("/api/notes?user_id=" + encodeURIComponent(userId()));
+      const notes = await res.json();
+      const ul = $("notes");
+      ul.innerHTML = "";
+      if (!Array.isArray(notes) || notes.length === 0) {
+        ul.innerHTML = "<li class='muted'>（尚無筆記）</li>";
+        return;
+      }
+      for (const n of notes) {
+        const li = document.createElement("li");
+        li.textContent = `[${n.type}] ${n.id} — ${n.preview}`;
+        ul.appendChild(li);
+      }
+    }
+
+    $("askBtn").addEventListener("click", ask);
+    $("uploadBtn").addEventListener("click", upload);
+    $("refreshBtn").addEventListener("click", loadNotes);
+    loadNotes();
+  </script>
+</body>
+</html>
