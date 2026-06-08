@@ -204,6 +204,7 @@
       const t = (text || "")
         .replace(/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/gm, "")       // drop --- / *** / ___ rules
         .replace(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/gm, "**$1**")   // headings -> bold
+        .replace(/\*\*\s*([^*\n]+?)\s*\*\*/g, "**$1**")           // trim spaces inside **bold**
         .replace(/\$\$[\s\S]+?\$\$/g, stash)
         .replace(/\\\[[\s\S]+?\\\]/g, stash)
         .replace(/\\\([\s\S]+?\\\)/g, stash)

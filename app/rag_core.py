@@ -321,7 +321,7 @@ def list_notes(user_id: str) -> list[dict]:
             "id": id_,
             "type": (meta or {}).get("type"),
             "source": (meta or {}).get("source"),
-            "preview": (doc or "")[:240],
+            "preview": (doc or "")[:240] + ("…" if len(doc or "") > 240 else ""),
         }
         for id_, doc, meta in zip(results["ids"], results["documents"], results["metadatas"])
     ]
