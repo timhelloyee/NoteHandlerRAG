@@ -1,3 +1,14 @@
+<!-- Hugging Face Spaces metadata (ignored by GitHub; required by HF for Docker Spaces) -->
+---
+title: NoteHandlerRAG
+emoji: 📒
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # NoteHandlerRAG
 
 A multimodal Retrieval-Augmented Generation (RAG) system over personal study notes

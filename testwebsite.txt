@@ -1,0 +1,2 @@
+cd C:\Users\user\Desktop\PythonProjects\NoteHandler
+C:\Users\user\anaconda3\envs\ragtraining\python.exe -m uvicorn app.main:app --port 8000

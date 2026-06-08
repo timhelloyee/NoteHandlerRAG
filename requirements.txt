@@ -1,4 +1,4 @@
-open_clip_torch
+sentence-transformers
 torch
 chromadb
 langchain-google-genai

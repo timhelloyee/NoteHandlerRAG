@@ -6,8 +6,13 @@
 # Original notebook kept local only (contains hardcoded keys)
 NoteHandler.ipynb
 
-# Vector stores (regenerable data)
-vectorstores/
+# Vector stores (regenerable) — ignore all except the seeded demo store, which the
+# Dockerfile bakes into the Hugging Face image so the deployed app boots with content.
+vectorstores/*
+!vectorstores/timhelloyee_gmail.com/
+
+# Source note files not needed by the deployed app (kept local only)
+pdf/
 
 # Jupyter
 .ipynb_checkpoints/

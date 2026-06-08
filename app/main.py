@@ -6,7 +6,7 @@ Run locally:
 Endpoints:
     GET  /                -> the web UI (static/index.html)
     POST /api/query       -> ask a question for a given user
-    POST /api/upload      -> upload a text or image note
+    POST /api/upload      -> upload a text, image, or PDF note
     GET  /api/notes       -> list a user's stored notes
     DELETE /api/notes/{id}-> delete a note
 """
@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -24,10 +25,24 @@ from . import rag_core
 
 app = FastAPI(title="NoteHandlerRAG")
 
+# CORS: the GitHub Pages frontend calls this backend cross-origin. Override with the
+# ALLOWED_ORIGINS env var (comma-separated) when the Pages / Space URL changes.
+_DEFAULT_ORIGINS = "https://timhelloyee.github.io,http://localhost:8000,http://127.0.0.1:8000"
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",") if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 TEXT_EXTS = {".txt", ".md"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+PDF_EXTS = {".pdf"}
 
 
 class QueryRequest(BaseModel):
@@ -56,7 +71,7 @@ async def upload(user_id: str = Form(...), file: UploadFile = File(...)):
     file_id = os.path.basename(file.filename)
     ext = Path(file_id).suffix.lower()
 
-    # Save the upload to a temp file so CLIP/Gemini can read it from disk.
+    # Save the upload to a temp file so the embedder/Gemini can read it from disk.
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
@@ -69,6 +84,9 @@ async def upload(user_id: str = Form(...), file: UploadFile = File(...)):
         elif ext in IMAGE_EXTS:
             description = rag_core.add_image_note(user_id, file_id, tmp_path, source=f"upload/{file_id}")
             return {"id": file_id, "type": "image", "added": bool(description), "description": description}
+        elif ext in PDF_EXTS:
+            description = rag_core.add_pdf_note(user_id, file_id, tmp_path, source=f"upload/{file_id}")
+            return {"id": file_id, "type": "pdf", "added": bool(description), "description": description}
         else:
             raise HTTPException(status_code=415, detail=f"Unsupported file type: {ext}")
     finally:
