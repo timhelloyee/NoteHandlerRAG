@@ -186,6 +186,23 @@
       if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
     }
 
+    // Render a short preview: inline Markdown (bold/italic/code) + LaTeX only — no
+    // block elements (headings, lists, rules) that would break the one-row layout.
+    function renderInline(el, text) {
+      const math = [];
+      const stash = (m) => "@@MATH" + (math.push(m) - 1) + "@@";
+      const t = (text || "")
+        .replace(/\$\$[\s\S]+?\$\$/g, stash)
+        .replace(/\\\[[\s\S]+?\\\]/g, stash)
+        .replace(/\\\([\s\S]+?\\\)/g, stash)
+        .replace(/\$[^\n$]+?\$/g, stash)
+        .replace(/\$[^$\n]*$/, "…");   // drop a dangling, unclosed $… left by truncation
+      let html = DOMPurify.sanitize(marked.parseInline(t));
+      html = html.replace(/@@MATH(\d+)@@/g, (_, i) => escapeHtml(math[Number(i)]));
+      el.innerHTML = html;
+      if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
+    }
+
     async function ask() {
       const question = $("question").value.trim();
       if (!question) return;
@@ -246,7 +263,12 @@
         const li = document.createElement("li");
         const meta = document.createElement("span");
         meta.className = "meta";
-        meta.textContent = `[${n.type}] ${n.id} — ${n.preview}`;
+        const tag = document.createElement("span");
+        tag.textContent = `[${n.type}] ${n.id} — `;
+        const preview = document.createElement("span");
+        renderInline(preview, n.preview);
+        meta.appendChild(tag);
+        meta.appendChild(preview);
         const del = document.createElement("button");
         del.className = "del";
         del.textContent = "刪除";
