@@ -186,17 +186,22 @@
       if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
     }
 
-    // Render a short preview: inline Markdown (bold/italic/code) + LaTeX only — no
-    // block elements (headings, lists, rules) that would break the one-row layout.
+    // Render a preview: inline Markdown (bold/italic/code) + LaTeX. Block-only syntax
+    // is normalized first — headings -> bold, horizontal rules dropped, blank lines
+    // collapsed — so it reads cleanly instead of showing raw "###" / "---".
     function renderInline(el, text) {
       const math = [];
       const stash = (m) => "@@MATH" + (math.push(m) - 1) + "@@";
       const t = (text || "")
+        .replace(/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/gm, "")       // drop --- / *** / ___ rules
+        .replace(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/gm, "**$1**")   // headings -> bold
         .replace(/\$\$[\s\S]+?\$\$/g, stash)
         .replace(/\\\[[\s\S]+?\\\]/g, stash)
         .replace(/\\\([\s\S]+?\\\)/g, stash)
         .replace(/\$[^\n$]+?\$/g, stash)
-        .replace(/\$[^$\n]*$/, "…");   // drop a dangling, unclosed $… left by truncation
+        .replace(/\n{2,}/g, "\n")                                 // collapse blank lines
+        .replace(/\$[^$\n]*$/, "…")                               // drop a dangling, unclosed $…
+        .trim();
       let html = DOMPurify.sanitize(marked.parseInline(t));
       html = html.replace(/@@MATH(\d+)@@/g, (_, i) => escapeHtml(math[Number(i)]));
       el.innerHTML = html;
