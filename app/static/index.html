@@ -164,6 +164,15 @@
       ? "https://timhelloyee-notehandler.hf.space"   // Hugging Face Space backend
       : "";
 
+    // Pull a readable message from a JSON error body (detail may be a string, an
+    // object/array, or absent) so we never render the useless "[object Object]".
+    const errText = (data, res) => {
+      const d = data && data.detail;
+      if (typeof d === "string") return d;
+      if (d != null) { try { return JSON.stringify(d); } catch (_) { return String(d); } }
+      return "HTTP " + res.status;
+    };
+
     marked.setOptions({ breaks: true });
     const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -221,7 +230,7 @@
         });
         const data = await res.json();
         if (res.ok) { renderRich($("answer"), data.answer); }
-        else { $("answer").textContent = "錯誤：" + (data.detail || res.status); }
+        else { $("answer").textContent = "錯誤：" + errText(data, res); }
       } catch (e) {
         $("answer").textContent = "請求失敗：" + e;
       } finally {
@@ -240,7 +249,7 @@
       try {
         const res = await fetch(API_BASE + "/api/upload", { method: "POST", body: fd });
         const data = await res.json();
-        if (!res.ok) { $("uploadResult").textContent = "錯誤：" + (data.detail || res.status); }
+        if (!res.ok) { $("uploadResult").textContent = "錯誤：" + errText(data, res); }
         else if (data.added === false) { $("uploadResult").textContent = data.id + " 已存在，跳過"; }
         else { $("uploadResult").textContent = data.id + " 已加入" + (data.description ? "（描述：" + data.description.slice(0, 60) + "…）" : ""); }
         loadNotes();
@@ -293,7 +302,7 @@
         );
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
-          alert("刪除失敗：" + (data.detail || res.status));
+          alert("刪除失敗：" + errText(data, res));
           return;
         }
         loadNotes();
