@@ -161,7 +161,7 @@
     // Backend base URL: on GitHub Pages, point at the Hugging Face Space; otherwise
     // (served by FastAPI locally or on the Space itself) use same-origin relative paths.
     const API_BASE = location.hostname.endsWith("github.io")
-      ? "https://CHANGE-ME.hf.space"   // TODO: set to your Hugging Face Space URL
+      ? "https://timhelloyee-notehandler.hf.space"   // Hugging Face Space backend
       : "";
 
     marked.setOptions({ breaks: true });
