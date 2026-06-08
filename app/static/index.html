@@ -220,6 +220,7 @@
     async function ask() {
       const question = $("question").value.trim();
       if (!question) return;
+      if (!userId()) { $("answer").textContent = "請先使用 Google 登入。"; return; }
       $("askBtn").disabled = true;
       $("answer").textContent = "思考中…";
       try {
@@ -241,6 +242,7 @@
     async function upload() {
       const file = $("file").files[0];
       if (!file) return;
+      if (!userId()) { $("uploadResult").textContent = "請先使用 Google 登入再上傳。"; return; }
       $("uploadBtn").disabled = true;
       $("uploadResult").textContent = "上傳中…（圖片 / PDF 需呼叫 Gemini 產生描述，可能稍久）";
       const fd = new FormData();
