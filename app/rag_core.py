@@ -9,6 +9,7 @@ Retrieval embedder is intfloat/multilingual-e5-base (繁中+英文皆強，跨�
 """
 import os
 import re
+import shutil
 import base64
 import hashlib
 
@@ -17,6 +18,7 @@ import chromadb
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from huggingface_hub import HfApi, snapshot_download
 from langchain_google_genai import ChatGoogleGenerativeAI
 from sentence_transformers import SentenceTransformer
 
@@ -147,6 +149,67 @@ def get_user_collection(user_id: str):
     return chroma_client.get_or_create_collection(name)
 
 
+# --- persistence: sync vectorstores to a private HF Dataset --------------------------
+# Space storage is ephemeral, so without this, runtime uploads are lost on every
+# restart/rebuild. We back the stores with a Dataset repo: restore on startup, push
+# the changed user's collection after each add/delete. Needs HF_TOKEN with WRITE access.
+HF_TOKEN = os.environ.get("HF_TOKEN")
+VECTORSTORE_DATASET = os.environ.get("VECTORSTORE_DATASET", "timhelloyee/notehandler-store")
+_hf_api = HfApi(token=HF_TOKEN) if HF_TOKEN else None
+
+
+def _restore_from_dataset():
+    """Pull saved vectorstores from the backing Dataset on startup so uploads survive
+    restarts/rebuilds. First run (empty dataset) seeds it from the image's baked store.
+    Any failure (no/invalid token, offline) is logged and ignored — the app still runs
+    on the baked seed, just without persistence."""
+    if not _hf_api:
+        print("[rag_core] HF_TOKEN not set — vectorstore persistence disabled (ephemeral).")
+        return
+    try:
+        _hf_api.create_repo(VECTORSTORE_DATASET, repo_type="dataset", private=True, exist_ok=True)
+        local = snapshot_download(VECTORSTORE_DATASET, repo_type="dataset", token=HF_TOKEN)
+        entries = [e for e in os.listdir(local) if not e.startswith(".")]
+        if entries:
+            os.makedirs(VECTORSTORE_ROOT, exist_ok=True)
+            for e in entries:
+                src = os.path.join(local, e)
+                if os.path.isdir(src):
+                    shutil.copytree(src, os.path.join(VECTORSTORE_ROOT, e), dirs_exist_ok=True)
+            print(f"[rag_core] restored vectorstores from {VECTORSTORE_DATASET}: {entries}")
+        else:
+            _persist_all()  # first run: initialize the dataset from the baked seed
+            print(f"[rag_core] initialized {VECTORSTORE_DATASET} from baked seed.")
+    except Exception as e:
+        print(f"[rag_core] vectorstore restore skipped ({e!r}); using local/baked store.")
+
+
+def _persist_all():
+    """Push the whole vectorstores tree to the Dataset (used to seed it on first run)."""
+    if not _hf_api or not os.path.isdir(VECTORSTORE_ROOT):
+        return
+    try:
+        _hf_api.upload_folder(folder_path=VECTORSTORE_ROOT, path_in_repo=".",
+                              repo_id=VECTORSTORE_DATASET, repo_type="dataset")
+    except Exception as e:
+        print(f"[rag_core] persist-all failed ({e!r}).")
+
+
+def _persist_user(user_id: str):
+    """Push one user's collection back to the Dataset after a change."""
+    if not _hf_api:
+        return
+    name = _safe_name(user_id)
+    folder = f"{VECTORSTORE_ROOT}/{name}"
+    if not os.path.isdir(folder):
+        return
+    try:
+        _hf_api.upload_folder(folder_path=folder, path_in_repo=name,
+                              repo_id=VECTORSTORE_DATASET, repo_type="dataset")
+    except Exception as e:
+        print(f"[rag_core] persist '{name}' failed ({e!r}).")
+
+
 # --- image description (Gemini vision) -------------------------------------
 def describe_image(image_path: str) -> str:
     with open(image_path, "rb") as f:
@@ -205,6 +268,7 @@ def add_text_note(user_id: str, file_id: str, content: str, source: str) -> bool
         documents=[content],
         metadatas=[{"type": "text", "source": source}],
     )
+    _persist_user(user_id)
     return True
 
 
@@ -223,6 +287,7 @@ def add_image_note(user_id: str, file_id: str, image_path: str, source: str) -> 
         documents=[description],
         metadatas=[{"type": "image", "source": source}],
     )
+    _persist_user(user_id)
     return description
 
 
@@ -241,6 +306,7 @@ def add_pdf_note(user_id: str, file_id: str, pdf_path: str, source: str) -> str:
         documents=[description],
         metadatas=[{"type": "pdf", "source": source}],
     )
+    _persist_user(user_id)
     return description
 
 
@@ -260,6 +326,7 @@ def list_notes(user_id: str) -> list[dict]:
 
 def delete_note(user_id: str, file_id: str) -> None:
     get_user_collection(user_id).delete(ids=[file_id])
+    _persist_user(user_id)
 
 
 # --- query ------------------------------------------------------------------
@@ -304,3 +371,8 @@ def rag_query(user_id: str, question: str, top_k: int = 10) -> str:
     # Use replace (not str.format) so literal { } in LaTeX examples don't break.
     prompt = PROMPT_TEMPLATE.replace("{context}", context).replace("{question}", question)
     return _llm_invoke(prompt)
+
+
+# Restore any previously-saved vectorstores from the backing Dataset (runs once at
+# import / server startup, before requests are served).
+_restore_from_dataset()

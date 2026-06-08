@@ -1,4 +1,5 @@
 sentence-transformers
+huggingface_hub
 torch
 chromadb
 langchain-google-genai
