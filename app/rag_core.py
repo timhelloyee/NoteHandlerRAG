@@ -213,6 +213,19 @@ def _persist_user(user_id: str):
         print(f"[rag_core] persist '{name}' failed ({e!r}).")
 
 
+# --- description cleanup ----------------------------------------------------
+# Gemini occasionally emits placeholder/box glyphs for symbols it can't transcribe
+# (□ ▢ ☐ �, etc.) and wraps bold around a stray space (** x ** which isn't valid
+# Markdown). Normalize both at ingest so stored notes render cleanly.
+_NOISE_GLYPHS = re.compile(r"[□▢▫◻◽☐⬜�][ \t]?")
+
+
+def _clean_description(text: str) -> str:
+    text = _NOISE_GLYPHS.sub("", text or "")
+    text = re.sub(r"\*\*\s*([^*\n]+?)\s*\*\*", r"**\1**", text)  # ** x ** -> **x**
+    return text
+
+
 # --- image description (Gemini vision) -------------------------------------
 def describe_image(image_path: str) -> str:
     with open(image_path, "rb") as f:
@@ -234,7 +247,7 @@ def describe_image(image_path: str) -> str:
         ],
         config={"temperature": 0, "top_p": 0.95, "top_k": 20},
     )
-    return response.text
+    return _clean_description(response.text)
 
 
 # --- PDF description (Gemini document understanding) ------------------------
@@ -256,7 +269,7 @@ def describe_pdf(pdf_path: str) -> str:
         ],
         config={"temperature": 0, "top_p": 0.95, "top_k": 20},
     )
-    return response.text
+    return _clean_description(response.text)
 
 
 # --- ingestion --------------------------------------------------------------
