@@ -6,10 +6,9 @@
 # Original notebook kept local only (contains hardcoded keys)
 NoteHandler.ipynb
 
-# Vector stores (regenerable) — ignore all except the seeded demo store, which the
-# Dockerfile bakes into the Hugging Face image so the deployed app boots with content.
-vectorstores/*
-!vectorstores/timhelloyee_gmail.com/
+# Vector stores — data lives only in the private HF Dataset, never committed here
+# (avoids leaking user emails / note content in a public repo).
+vectorstores/
 
 # Source note files not needed by the deployed app (kept local only)
 pdf/

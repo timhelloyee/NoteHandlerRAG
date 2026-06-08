@@ -15,9 +15,9 @@ COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --user torch --index-url https://download.pytorch.org/whl/cpu \
  && pip install --no-cache-dir --user -r requirements.txt
 
-# App code + seeded vectorstore (demo data). Secrets come from Space settings, not files.
+# App code only. Vectorstore data is restored at runtime from the private HF Dataset
+# (see rag_core._restore_from_dataset), so no user data is baked into the public image.
 COPY --chown=user app ./app
-COPY --chown=user vectorstores ./vectorstores
 
 EXPOSE 7860
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]

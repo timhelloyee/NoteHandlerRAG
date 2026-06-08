@@ -167,7 +167,10 @@ def _restore_from_dataset():
         print("[rag_core] HF_TOKEN not set — vectorstore persistence disabled (ephemeral).")
         return
     try:
-        _hf_api.create_repo(VECTORSTORE_DATASET, repo_type="dataset", private=True, exist_ok=True)
+        try:  # best-effort: needs write access; a read token can still restore below
+            _hf_api.create_repo(VECTORSTORE_DATASET, repo_type="dataset", private=True, exist_ok=True)
+        except Exception as e:
+            print(f"[rag_core] create_repo skipped ({e!r}); assuming dataset exists.")
         local = snapshot_download(VECTORSTORE_DATASET, repo_type="dataset", token=HF_TOKEN)
         entries = [e for e in os.listdir(local) if not e.startswith(".")]
         if entries:
