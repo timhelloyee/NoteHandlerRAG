@@ -226,6 +226,56 @@ def _clean_description(text: str) -> str:
     return text
 
 
+# --- chunking ----------------------------------------------------------------
+# Long notes (especially PDF extractions) stored as one giant vector dilute retrieval:
+# the embedding averages many topics, and e5-base truncates past its 512-token input
+# anyway. Split into sentence-aligned chunks near the embedder's effective window.
+CHUNK_CHARS = 450
+CHUNK_OVERLAP = 50
+_SENTENCE_END = re.compile(r"[。！？；!?\n]")
+
+
+def _chunk_text(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Split text into <=size-char chunks ending on sentence boundaries (hard-cut for
+    run-ons), with `overlap` chars carried across the seam. Same algorithm as
+    embed_folder.py's chunk_text, sized for e5-base instead of NoteMind."""
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= size:
+        return [text]
+    boundaries = [m.end() for m in _SENTENCE_END.finditer(text)]
+    n = len(text)
+    chunks, start = [], 0
+    while start < n:
+        end = min(start + size, n)
+        if end < n:
+            end = max((b for b in boundaries if start < b <= end), default=end)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= n:
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
+
+# --- keywords -----------------------------------------------------------------
+# The Gemini describe prompts end the description with a "關鍵字：…" line (free — same
+# API call). Stored per chunk in metadata, the keywords give exact-match anchors that
+# pure cosine similarity lacks; rag_query uses them as a small ranking boost.
+_KEYWORD_LINE = re.compile(r"關鍵字[:：]\s*(.+)")
+
+
+def _keywords_of(description: str) -> str:
+    """Extract the trailing 關鍵字 line as a 、-joined string ('' if absent)."""
+    m = _KEYWORD_LINE.search(description or "")
+    if not m:
+        return ""
+    kws = [k.strip() for k in re.split(r"[、,，;；/]\s*", m.group(1)) if k.strip()]
+    return "、".join(kws[:10])
+
+
 # --- image description (Gemini vision) -------------------------------------
 def describe_image(image_path: str) -> str:
     with open(image_path, "rb") as f:
@@ -243,6 +293,7 @@ def describe_image(image_path: str) -> str:
 3. 數學式請使用 LaTeX 表示（行內以 $...$，獨立公式以 $$...$$ 包住，例如 $F = \\dfrac{G m_1 m_2}{r^2}$），以忠實保留上下標與符號。
 4. 只描述圖片中實際出現的內容，不要編造；無法辨識處請標註為（無法辨識）。
 5. 盡量保留原文的關鍵用語與數據，以便後續能據此回答細節問題。
+6. 在最後另起一行，以「關鍵字：」開頭，列出 5 到 10 個此筆記最重要的關鍵字（以「、」分隔），優先選擇專有名詞與術語。
 """),
         ],
         config={"temperature": 0, "top_p": 0.95, "top_k": 20},
@@ -265,6 +316,7 @@ def describe_pdf(pdf_path: str) -> str:
 3. 數學式請使用 LaTeX 表示（行內以 $...$，獨立公式以 $$...$$ 包住，例如 $F = \\dfrac{G m_1 m_2}{r^2}$），以忠實保留上下標與符號。
 4. 只根據文件中實際出現的內容描述，不要自行補充或編造文件中沒有的資訊；若某處無法辨識，請標註為（無法辨識）。
 5. 盡量保留原文的關鍵用語與數據，以便後續能據此回答細節問題。
+6. 在最後另起一行，以「關鍵字：」開頭，列出 5 到 10 個此筆記最重要的關鍵字（以「、」分隔），優先選擇專有名詞與術語。
 """),
         ],
         config={"temperature": 0, "top_p": 0.95, "top_k": 20},
@@ -273,19 +325,48 @@ def describe_pdf(pdf_path: str) -> str:
 
 
 # --- ingestion --------------------------------------------------------------
-def add_text_note(user_id: str, file_id: str, content: str, source: str) -> bool:
-    """Returns True if added, False if it already existed."""
+def _base_id(chunk_id: str) -> str:
+    """'note.pdf#3' -> 'note.pdf'; ids without a numeric #suffix pass through."""
+    base, sep, suffix = chunk_id.rpartition("#")
+    return base if sep and suffix.isdigit() else chunk_id
+
+
+def _note_exists(collection, file_id: str) -> bool:
+    # Whole-doc notes use the bare id; chunked notes start at '<id>#0'.
+    return bool(collection.get(ids=[file_id, f"{file_id}#0"])["ids"])
+
+
+def _add_note(user_id: str, file_id: str, text: str, kind: str, source: str) -> bool:
+    """Chunk, embed, and store one note (one vector per chunk).
+
+    Returns True if added, False if it already existed. Pre-chunking data (one whole
+    document under the bare id) coexists fine: _base_id/list/delete handle both shapes.
+    """
     collection = get_user_collection(user_id)
-    if collection.get(ids=[file_id])["ids"]:
+    if _note_exists(collection, file_id):
         return False
+    chunks = _chunk_text(text)
+    if not chunks:
+        return False
+    keywords = _keywords_of(text)
+    ids = [file_id] if len(chunks) == 1 else [f"{file_id}#{i}" for i in range(len(chunks))]
     collection.add(
-        ids=[file_id],
-        embeddings=[embed_text([content])[0]],
-        documents=[content],
-        metadatas=[{"type": "text", "source": source}],
+        ids=ids,
+        embeddings=embed_text(chunks),
+        documents=chunks,
+        metadatas=[
+            {"type": kind, "source": source, "chunk": i, "n_chunks": len(chunks),
+             "keywords": keywords}
+            for i in range(len(chunks))
+        ],
     )
     _persist_user(user_id)
     return True
+
+
+def add_text_note(user_id: str, file_id: str, content: str, source: str) -> bool:
+    """Returns True if added, False if it already existed."""
+    return _add_note(user_id, file_id, content, "text", source)
 
 
 def add_image_note(user_id: str, file_id: str, image_path: str, source: str) -> str:
@@ -294,16 +375,10 @@ def add_image_note(user_id: str, file_id: str, image_path: str, source: str) -> 
     Returns the generated description (or "" if the note already existed).
     """
     collection = get_user_collection(user_id)
-    if collection.get(ids=[file_id])["ids"]:
+    if _note_exists(collection, file_id):
         return ""
     description = describe_image(image_path)
-    collection.add(
-        ids=[file_id],
-        embeddings=[embed_text([description])[0]],
-        documents=[description],
-        metadatas=[{"type": "image", "source": source}],
-    )
-    _persist_user(user_id)
+    _add_note(user_id, file_id, description, "image", source)
     return description
 
 
@@ -313,39 +388,39 @@ def add_pdf_note(user_id: str, file_id: str, pdf_path: str, source: str) -> str:
     Returns the generated description (or "" if the note already existed).
     """
     collection = get_user_collection(user_id)
-    if collection.get(ids=[file_id])["ids"]:
+    if _note_exists(collection, file_id):
         return ""
     description = describe_pdf(pdf_path)
-    collection.add(
-        ids=[file_id],
-        embeddings=[embed_text([description])[0]],
-        documents=[description],
-        metadatas=[{"type": "pdf", "source": source}],
-    )
-    _persist_user(user_id)
+    _add_note(user_id, file_id, description, "pdf", source)
     return description
 
 
 def list_notes(user_id: str) -> list[dict]:
+    """One entry per note, aggregating chunked notes (preview = first chunk)."""
     collection = get_user_collection(user_id)
     results = collection.get(include=["documents", "metadatas"])
-    return [
-        {
-            "id": id_,
-            "type": (meta or {}).get("type"),
-            "source": (meta or {}).get("source"),
-            "preview": (doc or "")[:240] + ("…" if len(doc or "") > 240 else ""),
-        }
-        for id_, doc, meta in zip(results["ids"], results["documents"], results["metadatas"])
-    ]
+    notes: dict[str, dict] = {}
+    for id_, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+        meta = meta or {}
+        base = _base_id(id_)
+        entry = notes.setdefault(base, {
+            "id": base, "type": meta.get("type"), "source": meta.get("source"),
+            "preview": "", "_chunks": int(meta.get("n_chunks") or 1),
+        })
+        if meta.get("chunk", 0) == 0:  # whole-doc notes have no 'chunk' key -> 0
+            doc = doc or ""
+            truncated = len(doc) > 240 or entry["_chunks"] > 1
+            entry["preview"] = doc[:240] + ("…" if truncated else "")
+    return [{k: v for k, v in e.items() if not k.startswith("_")} for e in notes.values()]
 
 
 def delete_note(user_id: str, file_id: str) -> bool:
-    """Returns True if the note existed and was deleted, False if it wasn't found."""
+    """Deletes a note and all its chunks. Returns False if it wasn't found."""
     collection = get_user_collection(user_id)
-    if not collection.get(ids=[file_id])["ids"]:
+    ids = [i for i in collection.get()["ids"] if _base_id(i) == file_id]
+    if not ids:
         return False
-    collection.delete(ids=[file_id])
+    collection.delete(ids=ids)
     _persist_user(user_id)
     return True
 
@@ -377,20 +452,46 @@ PROMPT_TEMPLATE = """你是一個專業的學習筆記問答助手。請「僅�
 MAX_DISTANCE = 0.35
 
 
-def rag_query(user_id: str, question: str, top_k: int = 10) -> str:
+# Keyword-overlap boost: stored keywords that literally appear in the question lower
+# the effective distance. Substring matching works well for Chinese (no word spacing),
+# and exact term hits are precisely the signal cosine similarity dilutes. Kept small so
+# it reorders near-ties instead of overriding semantic ranking.
+KEYWORD_BONUS = 0.03
+KEYWORD_BONUS_CAP = 3
+
+
+def _effective_distance(dist: float, meta: dict, question: str) -> float:
+    kws = ((meta or {}).get("keywords") or "").split("、")
+    hits = sum(1 for k in kws if len(k) >= 2 and k in question)
+    return dist - min(hits, KEYWORD_BONUS_CAP) * KEYWORD_BONUS
+
+
+def _retrieve(user_id: str, question: str, top_k: int = 10) -> list[str]:
+    """Top-k chunks for a question, keyword-boosted and distance-filtered."""
     collection = get_user_collection(user_id)
     q_embedding = embed_query(question)
     results = collection.query(
         query_embeddings=[q_embedding], n_results=top_k,
-        include=["documents", "distances"],  # explicit: don't rely on Chroma's default
+        include=["documents", "distances", "metadatas"],
     )
     docs = results["documents"][0] if results["documents"] else []
+    if not docs:
+        return []
     dists = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
+    metas = (results.get("metadatas") or [[]])[0] or [{}] * len(docs)
+    scored = sorted(
+        zip(docs, (_effective_distance(d, m, question) for d, m in zip(dists, metas))),
+        key=lambda x: x[1],
+    )
+    # Keep only relevant chunks, but always keep the single best one as a fallback.
+    kept = [doc for doc, eff in scored if eff <= MAX_DISTANCE]
+    return kept or [scored[0][0]]
+
+
+def rag_query(user_id: str, question: str, top_k: int = 10) -> str:
+    docs = _retrieve(user_id, question, top_k)
     if not docs:
         return "參考資料中沒有記載相關訊息"
-    # Keep only relevant chunks, but always keep the single best one as a fallback.
-    kept = [d for d, dist in zip(docs, dists) if dist <= MAX_DISTANCE]
-    docs = kept or docs[:1]
     context = "\n---\n".join(docs)
     # Use replace (not str.format) so literal { } in LaTeX examples don't break.
     prompt = PROMPT_TEMPLATE.replace("{context}", context).replace("{question}", question)
