@@ -340,9 +340,14 @@ def list_notes(user_id: str) -> list[dict]:
     ]
 
 
-def delete_note(user_id: str, file_id: str) -> None:
-    get_user_collection(user_id).delete(ids=[file_id])
+def delete_note(user_id: str, file_id: str) -> bool:
+    """Returns True if the note existed and was deleted, False if it wasn't found."""
+    collection = get_user_collection(user_id)
+    if not collection.get(ids=[file_id])["ids"]:
+        return False
+    collection.delete(ids=[file_id])
     _persist_user(user_id)
+    return True
 
 
 # --- query ------------------------------------------------------------------
@@ -375,7 +380,10 @@ MAX_DISTANCE = 0.35
 def rag_query(user_id: str, question: str, top_k: int = 10) -> str:
     collection = get_user_collection(user_id)
     q_embedding = embed_query(question)
-    results = collection.query(query_embeddings=[q_embedding], n_results=top_k)
+    results = collection.query(
+        query_embeddings=[q_embedding], n_results=top_k,
+        include=["documents", "distances"],  # explicit: don't rely on Chroma's default
+    )
     docs = results["documents"][0] if results["documents"] else []
     dists = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
     if not docs:

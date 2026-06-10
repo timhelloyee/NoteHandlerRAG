@@ -1,5 +1,9 @@
 """Embed every file in docs/ and images/ into a user's ChromaDB vectorstore.
 
+⚠️ Local CLI only — NOT used by the deployed app (app/rag_core.py). This script CHUNKS
+text (ids like "a.txt#0"), while the app stores one whole document per file (id "a.txt").
+Don't point both at the same store: the mixed id schemes would duplicate content.
+
   - text files  -> multilingual-e5-base text embedding of the file content
   - image files -> Gemini Flash description, then text embedding of the description
 

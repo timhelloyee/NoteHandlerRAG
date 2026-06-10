@@ -130,7 +130,8 @@
   <section>
     <label>Google 帳號</label>
     <div id="gsiButton"></div>
-    <p id="googleStatus" class="muted">使用 Google 登入即可用你的帳號 Email 作為使用者。</p>
+    <p id="googleStatus" class="muted">使用 Google 登入即可用你的帳號 Email 作為使用者。
+      <a id="signoutLink" href="#" style="display:none">登出</a></p>
     <input type="hidden" id="user" value="">
   </section>
 
@@ -268,9 +269,15 @@
         $("notes").innerHTML = "<li class='muted'>請先使用 Google 登入</li>";
         return;
       }
-      const res = await fetch(API_BASE + "/api/notes?user_id=" + encodeURIComponent(userId()));
-      const notes = await res.json();
       const ul = $("notes");
+      let notes;
+      try {
+        const res = await fetch(API_BASE + "/api/notes?user_id=" + encodeURIComponent(userId()));
+        notes = await res.json();
+      } catch (e) {
+        ul.innerHTML = "<li class='muted'>載入筆記失敗，請稍後重試</li>";
+        return;
+      }
       ul.innerHTML = "";
       if (!Array.isArray(notes) || notes.length === 0) {
         ul.innerHTML = "<li class='muted'>（尚無筆記）</li>";
@@ -330,20 +337,38 @@
       return JSON.parse(json);
     }
 
-    // 登入成功：用 Google 帳號 Email 當作使用者 id，並載入該使用者的筆記。
+    // 設定目前使用者並更新畫面（登入成功或從上次登入還原時共用）。
+    function setUser(email, label) {
+      $("user").value = email;
+      $("googleStatus").firstChild.textContent = label;
+      $("signoutLink").style.display = "";
+      $("answer").textContent = "";
+      $("uploadResult").textContent = "";
+      loadNotes();
+    }
+
+    // 登入成功：用 Google 帳號 Email 當作使用者 id，記住到 localStorage，
+    // 之後重新整理頁面不必再登入一次。
     function handleGoogleCredential(response) {
       try {
         const info = decodeJwt(response.credential);
         if (!info.email) return;
-        $("user").value = info.email;
-        $("googleStatus").textContent = "已連結：" + info.email + (info.name ? "（" + info.name + "）" : "");
-        $("answer").textContent = "";
-        $("uploadResult").textContent = "";
-        loadNotes();
+        localStorage.setItem("nh_user", info.email);
+        setUser(info.email, "已連結：" + info.email + (info.name ? "（" + info.name + "）" : ""));
       } catch (e) {
         $("googleStatus").textContent = "Google 登入解析失敗：" + e;
       }
     }
+
+    $("signoutLink").addEventListener("click", (ev) => {
+      ev.preventDefault();
+      localStorage.removeItem("nh_user");
+      location.reload();
+    });
+
+    // 還原上次登入的帳號（與 Google 登入同等信任層級：目前後端僅以 email 區分使用者）。
+    const savedUser = localStorage.getItem("nh_user");
+    if (savedUser) setUser(savedUser, "已連結（上次登入）：" + savedUser);
 
     function initGoogle() {
       if (!(window.google && google.accounts && google.accounts.id)) return;
@@ -359,7 +384,7 @@
     $("askBtn").addEventListener("click", ask);
     $("uploadBtn").addEventListener("click", upload);
     $("refreshBtn").addEventListener("click", loadNotes);
-    loadNotes();
+    if (!savedUser) loadNotes();  // 已還原帳號時 setUser 已載入過
   </script>
 </body>
 </html>

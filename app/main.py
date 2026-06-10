@@ -63,12 +63,26 @@ def query(req: QueryRequest):
     return QueryResponse(answer=answer)
 
 
+def _decode_text(raw: bytes) -> str:
+    """Decode an uploaded text note. Try UTF-8 (incl. BOM) first, then the common
+    Chinese encodings (Big5/CP950 for Taiwan, GB18030 as a superset fallback), so a
+    note saved by Windows Notepad in a legacy encoding doesn't 500 the upload."""
+    for enc in ("utf-8-sig", "cp950", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise HTTPException(status_code=415, detail="無法辨識文字檔編碼，請以 UTF-8 儲存後重新上傳")
+
+
 @app.post("/api/upload")
 async def upload(user_id: str = Form(...), file: UploadFile = File(...)):
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
 
-    file_id = os.path.basename(file.filename)
+    file_id = os.path.basename(file.filename or "")
+    if not file_id:
+        raise HTTPException(status_code=400, detail="檔名無效")
     ext = Path(file_id).suffix.lower()
 
     # Save the upload to a temp file so the embedder/Gemini can read it from disk.
@@ -78,7 +92,7 @@ async def upload(user_id: str = Form(...), file: UploadFile = File(...)):
 
     try:
         if ext in TEXT_EXTS:
-            content = Path(tmp_path).read_text(encoding="utf-8")
+            content = _decode_text(Path(tmp_path).read_bytes())
             added = rag_core.add_text_note(user_id, file_id, content, source=f"upload/{file_id}")
             return {"id": file_id, "type": "text", "added": added}
         elif ext in IMAGE_EXTS:
@@ -102,8 +116,14 @@ def notes(user_id: str):
 
 @app.delete("/api/notes/{file_id}")
 def remove_note(file_id: str, user_id: str):
-    rag_core.delete_note(user_id, file_id)
+    if not rag_core.delete_note(user_id, file_id):
+        raise HTTPException(status_code=404, detail=f"找不到筆記：{file_id}")
     return {"deleted": file_id}
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.get("/")

@@ -11,52 +11,67 @@ pinned: false
 
 # NoteHandlerRAG
 
-A multimodal Retrieval-Augmented Generation (RAG) system over personal study notes
-(text and images). It uses CLIP to embed content, ChromaDB as the vector store, and
-Google Gemini Flash for image description and answer generation.
+A multimodal Retrieval-Augmented Generation (RAG) web app over personal study notes
+(text, images, and PDFs). Sign in with Google, upload notes, and ask questions — answers
+are generated only from your own notes, rendered with Markdown + LaTeX.
 
-## How it works
+## Architecture
 
-- **Embedding** — `ViT-B-32` (OpenAI pretrained) via `open_clip` embeds both query text
-  and note content into a shared vector space.
-- **Vector store** — per-user ChromaDB collections under `vectorstores/<user>/`.
-- **Image notes** — Gemini Flash generates a text description of each image (including
-  the detected school subject), and that description is embedded and stored.
-- **Querying** — a question is embedded, the top-k relevant notes are retrieved, and
-  Gemini Flash answers based only on the retrieved context.
+- **Frontend** — a single static page ([app/static/index.html](app/static/index.html)),
+  served by the backend and also publishable to GitHub Pages (copy in `docs/`). Google
+  Identity Services supplies the user id (account email); `API_BASE` switches between
+  same-origin (local / Space) and the Space URL (Pages).
+- **Backend** — FastAPI ([app/main.py](app/main.py)) + core RAG logic
+  ([app/rag_core.py](app/rag_core.py)), deployed as a **Docker Space** on Hugging Face
+  (port 7860).
+- **Retrieval** — `intfloat/multilingual-e5-base` sentence embeddings (strong for
+  Traditional Chinese + English; `passage:` / `query:` prefixes) in per-user **ChromaDB**
+  collections under `vectorstores/<safe_user_id>/`.
+- **Generation & vision** — Google **Gemini** (`gemini-3.1-flash-lite`) describes uploaded
+  images/PDFs into searchable text and answers questions from retrieved context. Two API
+  keys with automatic quota fail-over.
+- **Persistence** — Space storage is ephemeral, so vectorstores are synced to a **private
+  HF Dataset** (`VECTORSTORE_DATASET`): restored at startup, pushed back after every
+  upload/delete. No note content or user emails are committed to this repo.
 
-## Notebooks
+## API
 
-| File | Purpose |
+| Endpoint | Purpose |
 | --- | --- |
-| `Input.ipynb` | Build/update the vector store: add text (`add_txt`) and image (`add_image`) notes. |
-| `NoteHandler_opus.ipynb` | Query the vector store and get a Gemini-generated answer. |
+| `POST /api/query` | Ask a question (`user_id`, `question`, `top_k`) |
+| `POST /api/upload` | Upload a `.txt`/`.md`/image/PDF note (multipart) |
+| `GET /api/notes?user_id=` | List a user's notes (with previews) |
+| `DELETE /api/notes/{id}?user_id=` | Delete a note |
+| `GET /api/health` | Liveness check |
 
-## Setup
+## Configuration (env vars / Space secrets)
+
+Copy `.env.example` to `.env` for local runs; on the Space set these as **secrets**:
+
+- `GEMINI_API_KEY_PRIMARY` / `GEMINI_API_KEY_SECONDARY` — required; the app fails over
+  between them on quota errors.
+- `HF_TOKEN` — token with access to the private Dataset (write access enables saving
+  uploads; without it the app runs but data is ephemeral).
+- `VECTORSTORE_DATASET` (optional) — backing Dataset repo id.
+- `ALLOWED_ORIGINS` (optional) — comma-separated CORS origins for the Pages frontend.
+- `VECTORSTORE_ROOT` (optional) — local store directory (default `./vectorstores`).
+
+## Run locally
 
 ```bash
 pip install -r requirements.txt
+uvicorn app.main:app --port 8000   # open http://localhost:8000
 ```
 
-Copy `.env.example` to `.env` and fill in your keys:
+Google sign-in requires the page origin to be listed under the OAuth client's
+**Authorized JavaScript origins** (e.g. `http://localhost:8000`), and does not work
+inside the Hugging Face Space iframe — open the Space in its own tab.
 
-```
-OPENAI_API_KEY=...
-GEMINI_API_KEY_PRIMARY=...      # default key
-GEMINI_API_KEY_SECONDARY=...    # backup key, used when the primary hits its quota
-LANGCHAIN_API_KEY=...
-```
+## Repo layout notes
 
-Two Gemini keys are supported to spread usage across the Gemini Flash rate limit.
-Notebooks read keys from `.env` via `python-dotenv` — no keys are hardcoded.
-
-## Usage
-
-1. Place note files in `docs/` (text) and `images/` (images).
-2. Run `Input.ipynb` to embed and store them.
-3. Run `NoteHandler_opus.ipynb` and enter a question when prompted.
-
-## Notes
-
-- `.env` and `vectorstores/` are git-ignored.
-- Requires Python 3.10+ (uses `list[str]` type hints).
+- `docs/index.html` is a copy of `app/static/index.html` for GitHub Pages — keep them in
+  sync when editing the frontend.
+- [embed_folder.py](embed_folder.py) and the notebooks are local experiments; the CLI
+  chunks text (ids like `a.txt#0`) which is **incompatible** with the app's whole-document
+  ids — don't point them at the same store the app uses.
+- `vectorstores/` and `.env` are git-ignored by design (privacy / secrets).

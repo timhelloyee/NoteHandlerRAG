@@ -1,11 +1,14 @@
-sentence-transformers
-huggingface_hub
-torch
-chromadb
+# Bounds protect the persisted data and API surface from breaking major upgrades on
+# Space rebuilds — chromadb especially: a 2.x might not read the 1.x store kept in the
+# private HF Dataset. Keep chromadb <2 unless the store is migrated deliberately.
+sentence-transformers>=5,<6
+huggingface_hub>=0.30
+torch>=2.5
+chromadb>=1.5,<2
 langchain-google-genai
 google-genai
 python-dotenv
 Pillow
-fastapi
+fastapi>=0.115,<1
 uvicorn[standard]
 python-multipart

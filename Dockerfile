@@ -15,6 +15,11 @@ COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --user torch --index-url https://download.pytorch.org/whl/cpu \
  && pip install --no-cache-dir --user -r requirements.txt
 
+# Bake the embedding model into the image so cold starts don't re-download ~1GB from
+# the HF Hub (slow boot + rate limits). The runtime cache (~/.cache/huggingface) then
+# already contains it and SentenceTransformer loads locally.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-base')"
+
 # App code only. Vectorstore data is restored at runtime from the private HF Dataset
 # (see rag_core._restore_from_dataset), so no user data is baked into the public image.
 COPY --chown=user app ./app
