@@ -41,7 +41,14 @@
     label { font-weight: 600; display: block; margin-bottom: .45rem; font-size: .95rem; }
 
     /* Inputs */
-    input, textarea, button { font: inherit; }
+    input, textarea, button, select { font: inherit; }
+    select {
+      padding: .5rem .7rem; border: 1px solid var(--border); border-radius: 10px;
+      background: #fbfcfe; color: var(--ink); cursor: pointer; max-width: 100%;
+    }
+    select:focus { outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+    .model-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: .8rem; }
+    .model-row label { margin: 0; white-space: nowrap; }
     input[type=text], textarea {
       width: 100%; padding: .65rem .8rem; border: 1px solid var(--border); border-radius: 10px;
       background: #fbfcfe; transition: border-color .15s, box-shadow .15s;
@@ -138,6 +145,11 @@
   <section>
     <label for="question">問問題</label>
     <textarea id="question" placeholder="輸入問題，例如：輸出每一個科目統整後的筆記內容"></textarea>
+    <div class="model-row">
+      <label for="model">AI 模型</label>
+      <select id="model"></select>
+    </div>
+    <p class="muted">此模型用於回答問題，以及解析上傳的圖片／PDF。</p>
     <button id="askBtn">送出</button>
     <div id="answer"></div>
   </section>
@@ -173,6 +185,49 @@
       if (d != null) { try { return JSON.stringify(d); } catch (_) { return String(d); } }
       return "HTTP " + res.status;
     };
+
+    // Model dropdown. The backend (/api/models) is the source of truth and validates
+    // every request against the same allowlist, so this fallback list existing to keep
+    // the UI usable when the backend is asleep can't cause an invalid model to be used
+    // — an unknown id simply falls back to the server default.
+    const FALLBACK_MODELS = [
+      { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
+      { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
+      { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+      { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite" },
+      { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite（預設）" },
+      { id: "gemini-3-flash-preview", label: "Gemini 3 Flash（preview）" },
+      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    ];
+
+    function fillModels(models, def) {
+      const sel = $("model");
+      sel.innerHTML = "";
+      for (const m of models) {
+        const opt = document.createElement("option");
+        opt.value = m.id;
+        opt.textContent = m.label || m.id;
+        sel.appendChild(opt);
+      }
+      // Restore the last choice; fall back to the server's default.
+      const saved = localStorage.getItem("nh_model");
+      sel.value = models.some((m) => m.id === saved) ? saved : def;
+      if (!sel.value && models.length) sel.value = models[0].id;
+    }
+
+    async function loadModels() {
+      try {
+        const res = await fetch(API_BASE + "/api/models");
+        const data = await res.json();
+        fillModels(data.models || FALLBACK_MODELS, data.default);
+      } catch (e) {
+        fillModels(FALLBACK_MODELS, "gemini-3.1-flash-lite");
+      }
+    }
+
+    $("model").addEventListener("change", () => {
+      localStorage.setItem("nh_model", $("model").value);
+    });
 
     marked.setOptions({ breaks: true });
     const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -229,7 +284,7 @@
         const res = await fetch(API_BASE + "/api/query", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: userId(), question, top_k: 10 }),
+          body: JSON.stringify({ user_id: userId(), question, top_k: 10, model: $("model").value }),
         });
         const data = await res.json();
         if (res.ok) { renderRich($("answer"), data.answer); }
@@ -250,6 +305,7 @@
       const fd = new FormData();
       fd.append("user_id", userId());
       fd.append("file", file);
+      fd.append("model", $("model").value);
       try {
         const res = await fetch(API_BASE + "/api/upload", { method: "POST", body: fd });
         const data = await res.json();
@@ -384,6 +440,7 @@
     $("askBtn").addEventListener("click", ask);
     $("uploadBtn").addEventListener("click", upload);
     $("refreshBtn").addEventListener("click", loadNotes);
+    loadModels();
     if (!savedUser) loadNotes();  // 已還原帳號時 setUser 已載入過
   </script>
 </body>

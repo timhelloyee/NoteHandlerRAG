@@ -49,18 +49,35 @@ class QueryRequest(BaseModel):
     user_id: str
     question: str
     top_k: int = 10
+    model: str | None = None
 
 
 class QueryResponse(BaseModel):
     answer: str
+    model: str
+
+
+@app.get("/api/models")
+def models():
+    """Models the UI dropdown offers, plus the default. Single source of truth so the
+    frontend list can't drift from what the backend actually accepts."""
+    return {"models": rag_core.AVAILABLE_MODELS, "default": rag_core.DEFAULT_MODEL}
+
+
+def _busy_detail(model: str) -> str:
+    return f"「{model}」目前忙碌或額度已用盡，請稍後再試，或在上方切換其他模型。"
 
 
 @app.post("/api/query", response_model=QueryResponse)
 def query(req: QueryRequest):
     if not req.user_id or not req.question.strip():
         raise HTTPException(status_code=400, detail="user_id and question are required")
-    answer = rag_core.rag_query(req.user_id, req.question, top_k=req.top_k)
-    return QueryResponse(answer=answer)
+    model = rag_core.resolve_model(req.model)
+    try:
+        answer = rag_core.rag_query(req.user_id, req.question, top_k=req.top_k, model=model)
+    except rag_core.ModelUnavailableError:
+        raise HTTPException(status_code=503, detail=_busy_detail(model))
+    return QueryResponse(answer=answer, model=model)
 
 
 def _decode_text(raw: bytes) -> str:
@@ -76,9 +93,11 @@ def _decode_text(raw: bytes) -> str:
 
 
 @app.post("/api/upload")
-async def upload(user_id: str = Form(...), file: UploadFile = File(...)):
+async def upload(user_id: str = Form(...), file: UploadFile = File(...),
+                 model: str = Form(None)):
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
+    model = rag_core.resolve_model(model)
 
     file_id = os.path.basename(file.filename or "")
     if not file_id:
@@ -96,13 +115,19 @@ async def upload(user_id: str = Form(...), file: UploadFile = File(...)):
             added = rag_core.add_text_note(user_id, file_id, content, source=f"upload/{file_id}")
             return {"id": file_id, "type": "text", "added": added}
         elif ext in IMAGE_EXTS:
-            description = rag_core.add_image_note(user_id, file_id, tmp_path, source=f"upload/{file_id}")
-            return {"id": file_id, "type": "image", "added": bool(description), "description": description}
+            description = rag_core.add_image_note(user_id, file_id, tmp_path,
+                                                  source=f"upload/{file_id}", model=model)
+            return {"id": file_id, "type": "image", "added": bool(description),
+                    "description": description, "model": model}
         elif ext in PDF_EXTS:
-            description = rag_core.add_pdf_note(user_id, file_id, tmp_path, source=f"upload/{file_id}")
-            return {"id": file_id, "type": "pdf", "added": bool(description), "description": description}
+            description = rag_core.add_pdf_note(user_id, file_id, tmp_path,
+                                                source=f"upload/{file_id}", model=model)
+            return {"id": file_id, "type": "pdf", "added": bool(description),
+                    "description": description, "model": model}
         else:
             raise HTTPException(status_code=415, detail=f"Unsupported file type: {ext}")
+    except rag_core.ModelUnavailableError:
+        raise HTTPException(status_code=503, detail=_busy_detail(model))
     finally:
         os.unlink(tmp_path)
 

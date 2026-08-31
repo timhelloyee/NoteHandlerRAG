@@ -39,15 +39,52 @@ _LLM_KEY_ORDER = [gemini_api_key_primary, gemini_api_key_secondary]
 _VISION_KEY_ORDER = [gemini_api_key_secondary, gemini_api_key_primary]
 
 _vision_clients = [genai.Client(api_key=k) for k in _VISION_KEY_ORDER]
-_llms = [
-    ChatGoogleGenerativeAI(
-        model="gemini-3.1-flash-lite",
-        temperature=0,
-        max_retries=2,
-        google_api_key=k,
-    )
-    for k in _LLM_KEY_ORDER
+
+# --- selectable models --------------------------------------------------------
+# Ids verified against the live models.list() endpoint — note 3 Flash exists only as
+# a -preview id. The UI offers exactly this list (served by /api/models) and requests
+# are validated against it, so a caller can't push an arbitrary string to the API.
+AVAILABLE_MODELS = [
+    {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash"},
+    {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash"},
+    {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash"},
+    {"id": "gemini-3.5-flash-lite", "label": "Gemini 3.5 Flash Lite"},
+    {"id": "gemini-3.1-flash-lite", "label": "Gemini 3.1 Flash Lite（預設）"},
+    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash（preview）"},
+    {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
 ]
+_MODEL_IDS = {m["id"] for m in AVAILABLE_MODELS}
+DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
+
+
+def resolve_model(name: str | None) -> str:
+    """Validate a requested model id against the allowlist, falling back to the
+    default. Never let an unvetted string reach the Gemini API."""
+    return name if name in _MODEL_IDS else DEFAULT_MODEL
+
+
+# Chat clients are cached per (model, key): building one is cheap but not free, and a
+# user flipping the dropdown back and forth shouldn't re-create them every request.
+_llm_cache: dict[tuple[str, int], ChatGoogleGenerativeAI] = {}
+
+
+def _get_llm(model: str, key_index: int) -> ChatGoogleGenerativeAI:
+    cached = _llm_cache.get((model, key_index))
+    if cached is None:
+        cached = ChatGoogleGenerativeAI(
+            model=model,
+            temperature=0,
+            max_retries=2,
+            google_api_key=_LLM_KEY_ORDER[key_index],
+        )
+        _llm_cache[(model, key_index)] = cached
+    return cached
+
+
+class ModelUnavailableError(RuntimeError):
+    """Every key was tried and the model is over quota or temporarily overloaded.
+    The API layer turns this into a 503 telling the user to retry or pick another
+    model — which the dropdown now makes a real option."""
 
 
 def _is_quota_error(exc: Exception) -> bool:
@@ -59,21 +96,38 @@ def _is_quota_error(exc: Exception) -> bool:
     )
 
 
-def _vision_generate(contents, config):
+def _is_transient_error(exc: Exception) -> bool:
+    """True for upstream hiccups worth retrying: 503 overload, 500 internal, timeouts.
+    Popular models return 503 'high demand' at busy times — that is not our bug."""
+    text = str(exc).upper()
+    return any(
+        s in text
+        for s in ("UNAVAILABLE", "503", "OVERLOADED", "INTERNAL", "500 ", "DEADLINE", "TIMEOUT")
+    )
+
+
+def _is_retryable(exc: Exception) -> bool:
+    return _is_quota_error(exc) or _is_transient_error(exc)
+
+
+def _vision_generate(contents, config, model: str | None = None):
     """generate_content with automatic fail-over to the backup key on quota errors."""
+    model = resolve_model(model)
     last_exc = None
     for i, client in enumerate(_vision_clients):
         try:
             return client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=contents, config=config
+                model=model, contents=contents, config=config
             )
         except Exception as e:
             last_exc = e
-            if _is_quota_error(e) and i < len(_vision_clients) - 1:
-                print(f"[rag_core] vision 金鑰 #{i} 額度用盡，改用備援金鑰…")
+            if _is_retryable(e) and i < len(_vision_clients) - 1:
+                print(f"[rag_core] vision 金鑰 #{i} 失敗（{type(e).__name__}），改用備援金鑰…")
                 continue
+            if _is_retryable(e):
+                raise ModelUnavailableError(model) from e
             raise
-    raise last_exc
+    raise ModelUnavailableError(model) from last_exc
 
 
 def _content_to_text(content) -> str:
@@ -95,19 +149,22 @@ def _content_to_text(content) -> str:
     return str(content)
 
 
-def _llm_invoke(prompt: str) -> str:
+def _llm_invoke(prompt: str, model: str | None = None) -> str:
     """llm.invoke with automatic fail-over to the backup key on quota errors."""
+    model = resolve_model(model)
     last_exc = None
-    for i, model in enumerate(_llms):
+    for i in range(len(_LLM_KEY_ORDER)):
         try:
-            return _content_to_text(model.invoke(prompt).content)
+            return _content_to_text(_get_llm(model, i).invoke(prompt).content)
         except Exception as e:
             last_exc = e
-            if _is_quota_error(e) and i < len(_llms) - 1:
-                print(f"[rag_core] LLM 金鑰 #{i} 額度用盡，改用備援金鑰…")
+            if _is_retryable(e) and i < len(_LLM_KEY_ORDER) - 1:
+                print(f"[rag_core] LLM 金鑰 #{i} 失敗（{type(e).__name__}），改用備援金鑰…")
                 continue
+            if _is_retryable(e):
+                raise ModelUnavailableError(model) from e
             raise
-    raise last_exc
+    raise ModelUnavailableError(model) from last_exc
 
 # --- embedding model (loaded once) -----------------------------------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -277,7 +334,7 @@ def _keywords_of(description: str) -> str:
 
 
 # --- image description (Gemini vision) -------------------------------------
-def describe_image(image_path: str) -> str:
+def describe_image(image_path: str, model: str | None = None) -> str:
     with open(image_path, "rb") as f:
         image_bytes = f.read()
     ext = image_path.rsplit(".", 1)[-1].lower()
@@ -297,12 +354,13 @@ def describe_image(image_path: str) -> str:
 """),
         ],
         config={"temperature": 0, "top_p": 0.95, "top_k": 20},
+        model=model,
     )
     return _clean_description(response.text)
 
 
 # --- PDF description (Gemini document understanding) ------------------------
-def describe_pdf(pdf_path: str) -> str:
+def describe_pdf(pdf_path: str, model: str | None = None) -> str:
     with open(pdf_path, "rb") as f:
         pdf_bytes = f.read()
     response = _vision_generate(
@@ -320,6 +378,7 @@ def describe_pdf(pdf_path: str) -> str:
 """),
         ],
         config={"temperature": 0, "top_p": 0.95, "top_k": 20},
+        model=model,
     )
     return _clean_description(response.text)
 
@@ -369,7 +428,8 @@ def add_text_note(user_id: str, file_id: str, content: str, source: str) -> bool
     return _add_note(user_id, file_id, content, "text", source)
 
 
-def add_image_note(user_id: str, file_id: str, image_path: str, source: str) -> str:
+def add_image_note(user_id: str, file_id: str, image_path: str, source: str,
+                   model: str | None = None) -> str:
     """Describes the image with Gemini, embeds the description, stores it.
 
     Returns the generated description (or "" if the note already existed).
@@ -377,12 +437,13 @@ def add_image_note(user_id: str, file_id: str, image_path: str, source: str) -> 
     collection = get_user_collection(user_id)
     if _note_exists(collection, file_id):
         return ""
-    description = describe_image(image_path)
+    description = describe_image(image_path, model=model)
     _add_note(user_id, file_id, description, "image", source)
     return description
 
 
-def add_pdf_note(user_id: str, file_id: str, pdf_path: str, source: str) -> str:
+def add_pdf_note(user_id: str, file_id: str, pdf_path: str, source: str,
+                 model: str | None = None) -> str:
     """Describes the PDF with Gemini, embeds the description, stores it.
 
     Returns the generated description (or "" if the note already existed).
@@ -390,7 +451,7 @@ def add_pdf_note(user_id: str, file_id: str, pdf_path: str, source: str) -> str:
     collection = get_user_collection(user_id)
     if _note_exists(collection, file_id):
         return ""
-    description = describe_pdf(pdf_path)
+    description = describe_pdf(pdf_path, model=model)
     _add_note(user_id, file_id, description, "pdf", source)
     return description
 
@@ -488,14 +549,14 @@ def _retrieve(user_id: str, question: str, top_k: int = 10) -> list[str]:
     return kept or [scored[0][0]]
 
 
-def rag_query(user_id: str, question: str, top_k: int = 10) -> str:
+def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = None) -> str:
     docs = _retrieve(user_id, question, top_k)
     if not docs:
         return "參考資料中沒有記載相關訊息"
     context = "\n---\n".join(docs)
     # Use replace (not str.format) so literal { } in LaTeX examples don't break.
     prompt = PROMPT_TEMPLATE.replace("{context}", context).replace("{question}", question)
-    return _llm_invoke(prompt)
+    return _llm_invoke(prompt, model=model)
 
 
 # Restore any previously-saved vectorstores from the backing Dataset (runs once at
