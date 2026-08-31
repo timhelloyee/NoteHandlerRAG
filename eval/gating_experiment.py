@@ -22,6 +22,7 @@ Dataset). Ingestion calls Gemini once per image/PDF per config, so it costs real
 """
 import argparse
 import json
+import random
 import os
 import shutil
 import sys
@@ -36,32 +37,62 @@ sys.path.insert(0, str(ROOT))
 
 from app import rag_core as rc  # noqa: E402
 
+CORPUS = Path('eval/corpus')
+
 CONFIGS = {
     "B1": {"structured": False, "desc": "prose extraction + 450/50 sliding window"},
     "B4": {"structured": True, "desc": "nested Markdown + structure chunking + ancestors"},
 }
 
 
-def sources():
-    """The research corpus: pdf/ only. docs/ and images/ were demo material and are
-    deliberately excluded — the study is on real multi-page handwritten notes."""
-    return [(p.name, p, "pdf") for p in sorted(ROOT.glob("pdf/*.pdf"))]
+def load_corpus(structured):
+    """Page texts produced by build_corpus.py — cached, so a run costs no API calls and
+    B1/B4 are compared on exactly the extractions that were measured and inspected."""
+    f = CORPUS / ("corpus_b4.json" if structured else "corpus_b1.json")
+    if not f.exists():
+        sys.exit(f"missing {f} — run: python eval/build_corpus.py"
+                 f"{' --structured' if structured else ''}")
+    return json.loads(f.read_text(encoding="utf-8"))
 
 
-def ingest(user, structured):
-    """Ingest every source note under one configuration. Returns per-note chunk counts."""
+def usable_pages():
+    """Page ids that are non-blank in BOTH corpora.
+
+    The configurations disagree about blank pages — the structured prompt describes an
+    empty page with headings, so it escapes the blank filter that catches the prose
+    version. Comparing different page sets would confound the result, so both configs
+    index exactly the same pages.
+    """
+    keep = None
+    for structured in (False, True):
+        ids = {f"{n['file']}#p{pg['page']:02d}"
+               for n in load_corpus(structured) for pg in n["page_texts"]
+               if not pg["blank"]}
+        keep = ids if keep is None else (keep & ids)
+    return keep
+
+
+def ingest(user, structured, pages_allowed):
+    """One retrievable unit per PAGE, id '<file>#pNN'.
+
+    Pages, not whole documents: with six PDFs the correct document is trivially rank 1
+    for every question (measured — both configurations tied at MRR 1.000), so document
+    level cannot see chunking at all. Sixty-odd pages give retrieval something to get
+    wrong. _base_id keeps '<file>#p07' intact because the suffix is not purely numeric,
+    so chunk ids '<file>#p07#2' still resolve back to the page.
+    """
     counts = {}
-    for name, path, kind in sources():
-        if kind == "text":
-            text = path.read_text(encoding="utf-8")
-        elif kind == "image":
-            text = rc.describe_image(str(path), structured=structured)
-        else:
-            text = rc.describe_pdf(str(path), structured=structured)
-        rc._add_note(user, name, text, kind, source=str(path), structured=structured)
-        ids = [i for i in rc.get_user_collection(user).get()["ids"] if rc._base_id(i) == name]
-        counts[name] = len(ids)
-        print(f"    {name:32} {kind:5} -> {len(ids):2} chunk(s), {len(text):5} chars")
+    for note in load_corpus(structured):
+        for pg in note["page_texts"]:
+            note_id = f"{note['file']}#p{pg['page']:02d}"
+            if note_id not in pages_allowed:
+                continue
+            rc._add_note(user, note_id, pg["text"], "pdf",
+                         source=f"pdf/{note['file']}#p{pg['page']}",
+                         structured=structured)
+            counts[note_id] = len([i for i in rc.get_user_collection(user).get()["ids"]
+                                   if rc._base_id(i) == note_id])
+    print(f"    {len(counts)} pages -> {sum(counts.values())} chunks")
     return counts
 
 
@@ -111,6 +142,31 @@ def score_chunks(user, cases, top_k=10):
             "n": t, "rows": rows}
 
 
+def paired_bootstrap(rows_a, rows_b, iters=10000, seed=0):
+    """95% CI for the paired MRR difference (B4 - B1).
+
+    Paired, because both configurations answer the same probes: the pairing removes
+    per-question difficulty, which is the dominant source of variance with only ~30
+    probes. A CI spanning zero means the corpus cannot distinguish the configurations —
+    which is a result, not a failure, and must be reported as such.
+    """
+    rr = lambda rank: (1.0 / rank) if rank else 0.0
+    diffs = [rr(b[2]) - rr(a[2]) for a, b in zip(rows_a, rows_b)]
+    n = len(diffs)
+    rng = random.Random(seed)
+    means = []
+    for _ in range(iters):
+        sample = [diffs[rng.randrange(n)] for _ in range(n)]
+        means.append(sum(sample) / n)
+    means.sort()
+    point = sum(diffs) / n
+    lo = means[int(0.025 * iters)]
+    hi = means[int(0.975 * iters)]
+    wins = sum(1 for d in diffs if d > 0)
+    losses = sum(1 for d in diffs if d < 0)
+    return point, lo, hi, wins, losses, n
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--configs", nargs="*", default=list(CONFIGS))
@@ -118,19 +174,23 @@ def main():
     args = ap.parse_args()
 
     here = Path(__file__).parent
-    cases = [c for c in json.loads((here / "cases.json")
-                                   .read_text(encoding="utf-8"))["cases"] if c.get("notes")]
     chunk_cases = json.loads((here / "chunk_cases.json").read_text(encoding="utf-8"))["cases"]
-    print(f"gating experiment — {len(cases)} note-level, {len(chunk_cases)} chunk-level "
-          f"cases | WHOLE_CORPUS_CHARS={rc.WHOLE_CORPUS_CHARS}\n")
+    # Same probes scored two ways: did the right PAGE surface, and did a chunk that
+    # actually contains the answer surface. The second is what chunking can move.
+    cases = [{"id": c["id"], "question": c["question"], "notes": [c["page"]]}
+             for c in chunk_cases]
+    print(f"gating experiment: {len(chunk_cases)} probes, scored at page and chunk level"
+          f" | WHOLE_CORPUS_CHARS={rc.WHOLE_CORPUS_CHARS}" + chr(10))
 
+    allowed = usable_pages()
+    print(f"    {len(allowed)} pages usable in both configurations" + chr(10))
     stamp = int(time.time())
     results = {}
     for name in args.configs:
         cfg = CONFIGS[name]
         user = f"exp_{name.lower()}_{stamp}"
         print(f"[{name}] {cfg['desc']}")
-        counts = ingest(user, cfg["structured"])
+        counts = ingest(user, cfg["structured"], allowed)
         r = score(user, cases)
         rc_ = score_chunks(user, chunk_cases)
         r["chunks"] = sum(counts.values())
@@ -147,7 +207,14 @@ def main():
 
     if len(results) == 2 and "B1" in results and "B4" in results:
         b1, b4 = results["B1"][2], results["B4"][2]
-        print(f"\nchunk-level MRR delta (B4 - B1): {b4['mrr'] - b1['mrr']:+.3f}")
+        point, lo, hi, wins, losses, n = paired_bootstrap(b1["rows"], b4["rows"])
+        spans_zero = lo <= 0 <= hi
+        print(chr(10) + f"chunk-level MRR delta (B4 - B1): {point:+.3f}  "
+              f"95% CI [{lo:+.3f}, {hi:+.3f}]  n={n}")
+        print(f"  {wins} improved, {losses} regressed, {n - wins - losses} unchanged")
+        print("  -> " + ("CI spans zero: no detectable difference between B1 and B4"
+                         if spans_zero else
+                         ("B4 significantly better" if lo > 0 else "B4 significantly worse")))
         print("rank of first chunk containing the answer (None = not in top-10):")
         for (cid, kind, r1), (_, _, r4) in zip(b1["rows"], b4["rows"]):
             mark = "  " if r1 == r4 else ("+ " if (r4 or 99) < (r1 or 99) else "- ")
