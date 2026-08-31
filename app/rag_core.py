@@ -270,6 +270,49 @@ def _persist_user(user_id: str):
         print(f"[rag_core] persist '{name}' failed ({e!r}).")
 
 
+# --- original files -----------------------------------------------------------
+# Ingestion stores Gemini's *description*, not the note itself, so without this the
+# source image is gone the moment the upload's temp file is deleted. Anything that later
+# wants the pixels — re-running extraction with a better model, layout/geometry work, or
+# simply showing the user their own page next to an answer — would need every note
+# re-collected. Originals live inside the user's store folder, so the existing Dataset
+# sync persists them with no extra plumbing.
+ORIGINALS_DIR = "originals"
+
+
+def _originals_path(user_id: str, file_id: str = "") -> str:
+    base = os.path.join(VECTORSTORE_ROOT, _safe_name(user_id), ORIGINALS_DIR)
+    return os.path.join(base, os.path.basename(file_id)) if file_id else base
+
+
+def save_original(user_id: str, file_id: str, src_path: str) -> str | None:
+    """Keep the uploaded file alongside the user's vectors. Returns the stored path."""
+    try:
+        folder = _originals_path(user_id)
+        os.makedirs(folder, exist_ok=True)
+        dest = os.path.join(folder, os.path.basename(file_id))
+        shutil.copyfile(src_path, dest)
+        return dest
+    except Exception as e:
+        print(f"[rag_core] could not keep original for '{file_id}' ({e!r}).")
+        return None
+
+
+def get_original(user_id: str, file_id: str) -> str | None:
+    """Path to a note's stored source file, or None if it wasn't kept."""
+    path = _originals_path(user_id, file_id)
+    return path if os.path.isfile(path) else None
+
+
+def _delete_original(user_id: str, file_id: str) -> None:
+    path = _originals_path(user_id, file_id)
+    if os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError as e:
+            print(f"[rag_core] could not remove original for '{file_id}' ({e!r}).")
+
+
 # --- description cleanup ----------------------------------------------------
 # Gemini occasionally emits placeholder/box glyphs for symbols it can't transcribe
 # (□ ▢ ☐ �, etc.) and wraps bold around a stray space (** x ** which isn't valid
@@ -317,6 +360,66 @@ def _chunk_text(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP
     return chunks
 
 
+# --- structure-aware chunking (experimental, config B4) -------------------------
+# The sliding window above cuts on sentence punctuation, which has nothing to do with a
+# note's own layout: a sub-item can be severed from its heading and then never ranks,
+# because e5's separation between "in my notes" and "not in my notes" is only ~0.02 and
+# an orphaned fragment carries neither topic words nor keyword anchors. When the
+# extraction preserves Markdown headings, split on those instead and prefix every chunk
+# with its ancestor path ("地理 › 氣候 › 季風成因 ›"), which puts the missing topic words
+# back into the embedded text.
+_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+ANCESTOR_DEPTH = 3  # deeper paths eat the 512-token budget for little gain
+
+
+def _ancestor_prefix(path: list[str]) -> str:
+    kept = [p for p in path if p][-ANCESTOR_DEPTH:]
+    return (" › ".join(kept) + " ›\n") if kept else ""
+
+
+def chunk_by_structure(text: str, size: int = CHUNK_CHARS,
+                       overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Chunk on Markdown heading hierarchy, prefixing each chunk with its ancestor path.
+
+    Falls back to the sliding window when the text carries no headings, so this is safe
+    to run over prose extractions too.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    sections: list[tuple[list[str], str]] = []
+    stack: list[str] = []
+    buf: list[str] = []
+
+    def flush():
+        body = "\n".join(buf).strip()
+        if body:
+            sections.append((list(stack), body))
+        buf.clear()
+
+    for line in text.splitlines():
+        m = _HEADING.match(line)
+        if m:
+            flush()
+            level = len(m.group(1))
+            del stack[level - 1:]
+            stack.append(m.group(2).strip())
+        else:
+            buf.append(line)
+    flush()
+
+    if not any(path for path, _ in sections):
+        return _chunk_text(text, size, overlap)   # no headings — nothing to preserve
+
+    chunks: list[str] = []
+    for path, body in sections:
+        prefix = _ancestor_prefix(path)
+        room = max(size - len(prefix), 120)       # keep the prefix from starving the body
+        for part in _chunk_text(body, room, overlap):
+            chunks.append(prefix + part)
+    return chunks
+
+
 # --- keywords -----------------------------------------------------------------
 # The Gemini describe prompts end the description with a "關鍵字：…" line (free — same
 # API call). Stored per chunk in metadata, the keywords give exact-match anchors that
@@ -333,16 +436,22 @@ def _keywords_of(description: str) -> str:
     return "、".join(kws[:10])
 
 
+# Config B4 of the structure experiment: ask the model to emit the note's hierarchy as
+# nested Markdown instead of prose, so chunk_by_structure has real headings to split on.
+# This is the cheap alternative that must be ruled out before any layout-detection work.
+STRUCTURED_RULE = """
+7. 請用巢狀 Markdown 還原筆記本身的階層：整頁主題用 #，大標題用 ##，次標題用 ###，條列項目用 - 並以縮排表示層級。標題必須採用筆記上實際出現的文字，不要自行發明分類；若某區塊沒有標題，可用該區第一行作為標題。
+"""
+
+
 # --- image description (Gemini vision) -------------------------------------
-def describe_image(image_path: str, model: str | None = None) -> str:
+def describe_image(image_path: str, model: str | None = None,
+                   structured: bool = False) -> str:
     with open(image_path, "rb") as f:
         image_bytes = f.read()
     ext = image_path.rsplit(".", 1)[-1].lower()
     mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
-    response = _vision_generate(
-        contents=[
-            types.Part.from_bytes(data=image_bytes, mime_type=mime),
-            types.Part.from_text(text="""請以繁體中文，完整且忠實地擷取並整理這張筆記圖片中的所有內容，不要遺漏。
+    prompt = """請以繁體中文，完整且忠實地擷取並整理這張筆記圖片中的所有內容，不要遺漏。
 
 請遵守以下規則：
 1. 在最開頭先判斷這是什麼科目（國文、英文、數學、物理、化學、地球科學、生物、地理、公民、歷史擇一），格式為：這是一份【科目】科的筆記。
@@ -351,7 +460,13 @@ def describe_image(image_path: str, model: str | None = None) -> str:
 4. 只描述圖片中實際出現的內容，不要編造；無法辨識處請標註為（無法辨識）。
 5. 盡量保留原文的關鍵用語與數據，以便後續能據此回答細節問題。
 6. 在最後另起一行，以「關鍵字：」開頭，列出 5 到 10 個此筆記最重要的關鍵字（以「、」分隔），優先選擇專有名詞與術語。
-"""),
+"""
+    if structured:
+        prompt += STRUCTURED_RULE
+    response = _vision_generate(
+        contents=[
+            types.Part.from_bytes(data=image_bytes, mime_type=mime),
+            types.Part.from_text(text=prompt),
         ],
         config={"temperature": 0, "top_p": 0.95, "top_k": 20},
         model=model,
@@ -360,13 +475,11 @@ def describe_image(image_path: str, model: str | None = None) -> str:
 
 
 # --- PDF description (Gemini document understanding) ------------------------
-def describe_pdf(pdf_path: str, model: str | None = None) -> str:
+def describe_pdf(pdf_path: str, model: str | None = None,
+                 structured: bool = False) -> str:
     with open(pdf_path, "rb") as f:
         pdf_bytes = f.read()
-    response = _vision_generate(
-        contents=[
-            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            types.Part.from_text(text="""請以繁體中文，完整且忠實地擷取並整理這份 PDF 筆記的所有內容，逐頁處理，不要遺漏任何一頁。
+    prompt = """請以繁體中文，完整且忠實地擷取並整理這份 PDF 筆記的所有內容，逐頁處理，不要遺漏任何一頁。
 
 請遵守以下規則：
 1. 在最開頭先判斷這是什麼科目（國文、英文、數學、物理、化學、地球科學、生物、地理、公民、歷史擇一），格式為：這是一份【科目】科的筆記。
@@ -375,7 +488,13 @@ def describe_pdf(pdf_path: str, model: str | None = None) -> str:
 4. 只根據文件中實際出現的內容描述，不要自行補充或編造文件中沒有的資訊；若某處無法辨識，請標註為（無法辨識）。
 5. 盡量保留原文的關鍵用語與數據，以便後續能據此回答細節問題。
 6. 在最後另起一行，以「關鍵字：」開頭，列出 5 到 10 個此筆記最重要的關鍵字（以「、」分隔），優先選擇專有名詞與術語。
-"""),
+"""
+    if structured:
+        prompt += STRUCTURED_RULE
+    response = _vision_generate(
+        contents=[
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+            types.Part.from_text(text=prompt),
         ],
         config={"temperature": 0, "top_p": 0.95, "top_k": 20},
         model=model,
@@ -395,7 +514,8 @@ def _note_exists(collection, file_id: str) -> bool:
     return bool(collection.get(ids=[file_id, f"{file_id}#0"])["ids"])
 
 
-def _add_note(user_id: str, file_id: str, text: str, kind: str, source: str) -> bool:
+def _add_note(user_id: str, file_id: str, text: str, kind: str, source: str,
+              structured: bool = False) -> bool:
     """Chunk, embed, and store one note (one vector per chunk).
 
     Returns True if added, False if it already existed. Pre-chunking data (one whole
@@ -404,7 +524,7 @@ def _add_note(user_id: str, file_id: str, text: str, kind: str, source: str) -> 
     collection = get_user_collection(user_id)
     if _note_exists(collection, file_id):
         return False
-    chunks = _chunk_text(text)
+    chunks = (chunk_by_structure if structured else _chunk_text)(text)
     if not chunks:
         return False
     keywords = _keywords_of(text)
@@ -528,6 +648,7 @@ def delete_note(user_id: str, file_id: str) -> bool:
     if not ids:
         return False
     collection.delete(ids=ids)
+    _delete_original(user_id, file_id)
     _persist_user(user_id)
     return True
 
@@ -616,7 +737,10 @@ def _retrieve(user_id: str, question: str, top_k: int = 10) -> list[str]:
 # fitted anyway. Gemini's window is ~1M tokens, so this cap (~20k tokens of Chinese) is
 # far below it and keeps a query cheap, while covering a student's notes for a long time.
 # Above the cap we fall back to retrieval, which is what makes the app keep scaling.
-WHOLE_CORPUS_CHARS = 60_000
+# Set WHOLE_CORPUS_CHARS=0 to force the retrieval path — required when measuring
+# retrieval quality, since otherwise a small corpus never exercises the retriever and
+# every chunking configuration scores identically.
+WHOLE_CORPUS_CHARS = int(os.environ.get("WHOLE_CORPUS_CHARS", 60_000))
 
 
 def _whole_corpus(collection) -> list[str] | None:
@@ -628,6 +752,8 @@ def _whole_corpus(collection) -> list[str] | None:
     450-char boundaries. Rejoining restores the note as it was extracted, which keeps the
     document's own structure (headings, numbered questions) intact for the model.
     """
+    if WHOLE_CORPUS_CHARS <= 0:
+        return None
     got = collection.get(include=["documents", "metadatas"])
     docs = got["documents"] or []
     if not docs or sum(len(d or "") for d in docs) > WHOLE_CORPUS_CHARS:

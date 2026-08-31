@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "Chunk-level retrieval probes for the gating experiment.",
+    "",
+    "Note-level ground truth cannot measure chunking: with one note per subject the",
+    "right note is always rank 1 and every configuration ties. These probes ask for a",
+    "specific fact that lives INSIDE a multi-chunk note, so the question is whether the",
+    "chunk carrying the answer ranks highly among that note's own sibling chunks.",
+    "",
+    "Gold is an answer SPAN, not a chunk id, because chunk boundaries differ per",
+    "configuration — a retrieved chunk counts as correct when it contains the span.",
+    "",
+    "type: fact       — answer sits in one block",
+    "      hierarchy  — answer only makes sense together with its parent heading",
+    "note: the note the span lives in (all are multi-chunk)"
+  ],
+  "cases": [
+    {"id": "pdf-titan", "type": "fact", "note": "哈佛高二下二段段複.pdf",
+     "question": "估算土星質量要用哪顆衛星的資料？", "span": "泰坦"},
+    {"id": "pdf-blinds", "type": "fact", "note": "哈佛高二下二段段複.pdf",
+     "question": "百葉窗拉上來需要作多少功？", "span": "百葉窗"},
+    {"id": "pdf-lagrange", "type": "hierarchy", "note": "哈佛高二下二段段複.pdf",
+     "question": "JWST 望遠鏡所在的拉格朗日點問了什麼？", "span": "拉格朗日"},
+    {"id": "pdf-power", "type": "fact", "note": "哈佛高二下二段段複.pdf",
+     "question": "汽車功率與最大速率那一題的條件是什麼？", "span": "功率"},
+    {"id": "civics-emperor", "type": "fact", "note": "Civics_Note.jpg",
+     "question": "誠信原則又叫什麼條款？", "span": "帝王條款"},
+    {"id": "civics-reserve", "type": "hierarchy", "note": "Civics_Note.jpg",
+     "question": "依法行政中，得到法律授權才能積極行事的是哪個原則？", "span": "法律保留"},
+    {"id": "civics-court", "type": "fact", "note": "Civics_Note.jpg",
+     "question": "2022 年後由哪個機關做違憲審查？", "span": "憲法法庭"},
+    {"id": "geo-geneva", "type": "fact", "note": "Geographic_Note.jpg",
+     "question": "世界貿易組織總部在哪裡？", "span": "日內瓦"},
+    {"id": "geo-washington", "type": "fact", "note": "Geographic_Note.jpg",
+     "question": "國際貨幣基金總部在哪裡？", "span": "華盛頓"},
+    {"id": "geo-domino", "type": "hierarchy", "note": "Geographic_Note.jpg",
+     "question": "骨牌效應的例子是什麼？", "span": "石油"}
+  ]
+}

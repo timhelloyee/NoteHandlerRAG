@@ -117,11 +117,16 @@ async def upload(user_id: str = Form(...), file: UploadFile = File(...),
         elif ext in IMAGE_EXTS:
             description = rag_core.add_image_note(user_id, file_id, tmp_path,
                                                   source=f"upload/{file_id}", model=model)
+            if description:
+                # Keep the pixels: the store only holds Gemini's description of them.
+                rag_core.save_original(user_id, file_id, tmp_path)
             return {"id": file_id, "type": "image", "added": bool(description),
                     "description": description, "model": model}
         elif ext in PDF_EXTS:
             description = rag_core.add_pdf_note(user_id, file_id, tmp_path,
                                                 source=f"upload/{file_id}", model=model)
+            if description:
+                rag_core.save_original(user_id, file_id, tmp_path)
             return {"id": file_id, "type": "pdf", "added": bool(description),
                     "description": description, "model": model}
         else:
@@ -153,6 +158,18 @@ def note_text(file_id: str, user_id: str):
     if text is None:
         raise HTTPException(status_code=404, detail=f"找不到筆記：{file_id}")
     return {"id": file_id, "text": text}
+
+
+@app.get("/api/notes/{file_id}/original")
+def note_original(file_id: str, user_id: str):
+    """The source image/PDF a note was extracted from, when it was kept."""
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    path = rag_core.get_original(user_id, file_id)
+    if not path:
+        raise HTTPException(status_code=404,
+                            detail=f"沒有保留 {file_id} 的原始檔（可能是在此功能上線前上傳的）")
+    return FileResponse(path, filename=file_id)
 
 
 @app.put("/api/notes/{file_id}")
