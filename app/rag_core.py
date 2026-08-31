@@ -9,9 +9,11 @@ Retrieval embedder is intfloat/multilingual-e5-base (繁中+英文皆強，跨�
 """
 import os
 import re
+import io
 import shutil
 import base64
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import chromadb
@@ -474,34 +476,6 @@ def describe_image(image_path: str, model: str | None = None,
     return _clean_description(response.text)
 
 
-# --- PDF description (Gemini document understanding) ------------------------
-def describe_pdf(pdf_path: str, model: str | None = None,
-                 structured: bool = False) -> str:
-    with open(pdf_path, "rb") as f:
-        pdf_bytes = f.read()
-    prompt = """請以繁體中文，完整且忠實地擷取並整理這份 PDF 筆記的所有內容，逐頁處理，不要遺漏任何一頁。
-
-請遵守以下規則：
-1. 在最開頭先判斷這是什麼科目（國文、英文、數學、物理、化學、地球科學、生物、地理、公民、歷史、程式設計擇一），格式為：這是一份【科目】科的筆記。
-2. 依文件原本的章節、標題、條列順序，逐項記錄「實際出現的內容」，包括：定義、公式、定理、重要名詞、例題與其完整條件（已知數值、單位、所求）。不要只寫「涉及……的計算」這類概括性描述，而要寫出真正的內容與細節。
-3. 數學式請使用 LaTeX 表示（行內以 $...$，獨立公式以 $$...$$ 包住，例如 $F = \\dfrac{G m_1 m_2}{r^2}$），以忠實保留上下標與符號。
-4. 只根據文件中實際出現的內容描述，不要自行補充或編造文件中沒有的資訊；若某處無法辨識，請標註為（無法辨識）。
-5. 盡量保留原文的關鍵用語與數據，以便後續能據此回答細節問題。
-6. 在最後另起一行，以「關鍵字：」開頭，列出 5 到 10 個此筆記最重要的關鍵字（以「、」分隔），優先選擇專有名詞與術語。
-"""
-    if structured:
-        prompt += STRUCTURED_RULE
-    response = _vision_generate(
-        contents=[
-            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            types.Part.from_text(text=prompt),
-        ],
-        config={"temperature": 0, "top_p": 0.95, "top_k": 20},
-        model=model,
-    )
-    return _clean_description(response.text)
-
-
 # Subject tag Gemini is asked to emit at the top of every extraction.
 _SUBJECT_TAG = re.compile(r"這是一份[【\[]?([^】\]\s]+?)[】\]]?科的筆記")
 
@@ -512,9 +486,7 @@ def subject_of(text: str) -> str:
     return m.group(1) if m else "?"
 
 
-# Per-page variant of the PDF prompt. A whole multi-page scan in one call comes back
-# summarised (a 4-page exam lost a table outright), and the largest notes exceed the
-# inline request limit anyway, so pages are sent individually.
+# Per-page variant of the PDF prompt: one page at a time, tables transcribed not skipped.
 PDF_PAGE_PROMPT = """請以繁體中文，完整且忠實地擷取並整理這一頁筆記的所有內容，不要遺漏。
 
 請遵守以下規則：
@@ -525,6 +497,91 @@ PDF_PAGE_PROMPT = """請以繁體中文，完整且忠實地擷取並整理這�
 5. 這是手寫筆記，字跡可能潦草；請盡力辨識並保留原文的關鍵用語與數據。
 6. 在最後另起一行，以「關鍵字：」開頭，列出 5 到 10 個此頁最重要的關鍵字（以「、」分隔），優先選擇專有名詞與術語。
 """
+
+# --- PDF description (Gemini document understanding) ------------------------
+# PDFs are described one page at a time. A whole multi-page document in a single call is
+# both lossy (a 4-page exam came back with its table replaced by "（表略）") and, past
+# roughly 10 MB, impossible: base64-encoded it exceeds the inline request limit, so large
+# scans failed outright. Pages are split with pypdf — no rasterising, nothing re-encoded —
+# and described concurrently so a 23-page upload stays a normal request rather than a
+# two-minute stall.
+PDF_PAGE_WORKERS = int(os.environ.get("PDF_PAGE_WORKERS", 4))
+_BLANK_MARKERS = ("沒有任何文字", "空白", "無內容")
+
+
+def is_blank_page(text: str) -> bool:
+    """True for a photographed blank page. Gemini reports these honestly; indexing them
+    would put 'this page is empty' into the store as a retrievable passage."""
+    t = text or ""
+    return subject_of(t) == "無法辨識" and len(t) < 160 and any(m in t for m in _BLANK_MARKERS)
+
+
+def _pdf_page_bytes(pdf_path: str) -> list[bytes]:
+    """Each page as a standalone one-page PDF."""
+    from pypdf import PdfReader, PdfWriter
+    reader = PdfReader(pdf_path)
+    out = []
+    for page in reader.pages:
+        writer = PdfWriter()
+        writer.add_page(page)
+        buf = io.BytesIO()
+        writer.write(buf)
+        out.append(buf.getvalue())
+    return out
+
+
+def describe_pdf_page(data: bytes, model: str | None = None,
+                      structured: bool = False) -> str:
+    """Describe one page of a PDF."""
+    prompt = PDF_PAGE_PROMPT + (STRUCTURED_RULE if structured else "")
+    response = _vision_generate(
+        contents=[types.Part.from_bytes(data=data, mime_type="application/pdf"),
+                  types.Part.from_text(text=prompt)],
+        config={"temperature": 0, "top_p": 0.95, "top_k": 20},
+        model=model,
+    )
+    return _clean_description(response.text or "")
+
+
+def _strip_page_furniture(text: str) -> str:
+    """Drop the per-page subject tag and keyword line; the assembled note carries its own."""
+    out = _SUBJECT_TAG.sub("", text or "", count=1)
+    out = _KEYWORD_LINE.sub("", out)
+    return out.strip()
+
+
+def describe_pdf(pdf_path: str, model: str | None = None,
+                 structured: bool = False) -> str:
+    """Describe a PDF page by page and assemble one note.
+
+    Pages become '## 第 N 頁' sections, which gives the structure chunker real headings
+    and keeps page provenance in the stored text. Blank pages are skipped.
+    """
+    pages = _pdf_page_bytes(pdf_path)
+    if not pages:
+        return ""
+    workers = max(1, min(PDF_PAGE_WORKERS, len(pages)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        texts = list(pool.map(
+            lambda d: describe_pdf_page(d, model=model, structured=structured), pages))
+
+    kept = [(i + 1, t) for i, t in enumerate(texts) if t and not is_blank_page(t)]
+    if not kept:
+        return ""
+
+    subject = next((subject_of(t) for _, t in kept if subject_of(t) != "?"), "?")
+    keywords: list[str] = []
+    for _, t in kept:
+        for k in (_keywords_of(t) or "").split("、"):
+            if k and k not in keywords:
+                keywords.append(k)
+
+    nl = chr(10)
+    body = (nl + nl).join(
+        f'## 第 {n} 頁' + nl + _strip_page_furniture(t) for n, t in kept)
+    head = f'這是一份【{subject}】科的筆記。' + nl + nl if subject != '?' else ''
+    tail = (nl + nl + '關鍵字：' + '、'.join(keywords[:12])) if keywords else ''
+    return head + body + tail
 
 
 # --- ingestion --------------------------------------------------------------

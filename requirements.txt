@@ -9,6 +9,7 @@ langchain-google-genai
 google-genai
 python-dotenv
 Pillow
+pypdf>=4
 fastapi>=0.115,<1
 uvicorn[standard]
 python-multipart
