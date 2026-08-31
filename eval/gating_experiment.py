@@ -43,16 +43,9 @@ CONFIGS = {
 
 
 def sources():
-    """The note files to ingest, mirroring what the app would receive as uploads."""
-    out = []
-    for p in sorted(ROOT.glob("docs/*.txt")):
-        out.append((p.name, p, "text"))
-    for ext in ("jpg", "jpeg", "png"):
-        for p in sorted(ROOT.glob(f"images/*.{ext}")):
-            out.append((p.name, p, "image"))
-    for p in sorted(ROOT.glob("pdf/*.pdf")):
-        out.append((p.name, p, "pdf"))
-    return out
+    """The research corpus: pdf/ only. docs/ and images/ were demo material and are
+    deliberately excluded — the study is on real multi-page handwritten notes."""
+    return [(p.name, p, "pdf") for p in sorted(ROOT.glob("pdf/*.pdf"))]
 
 
 def ingest(user, structured):

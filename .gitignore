@@ -21,3 +21,7 @@ __pycache__/
 *.pyc
 venv/
 env/
+
+# Cached Gemini page extractions (regenerable, and they contain note content)
+eval/cache/
+eval/corpus/
