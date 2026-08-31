@@ -42,13 +42,15 @@ CORPUS = Path('eval/corpus')
 CONFIGS = {
     "B1": {"structured": False, "desc": "prose extraction + 450/50 sliding window"},
     "B4": {"structured": True, "desc": "nested Markdown + structure chunking + ancestors"},
+    "B0": {"structured": True, "corpus": "corpus_b0.json",
+           "desc": "oracle: human-corrected text + human structure tree"},
 }
 
 
-def load_corpus(structured):
+def load_corpus(structured, corpus_file=None):
     """Page texts produced by build_corpus.py — cached, so a run costs no API calls and
     B1/B4 are compared on exactly the extractions that were measured and inspected."""
-    f = CORPUS / ("corpus_b4.json" if structured else "corpus_b1.json")
+    f = CORPUS / (corpus_file or ("corpus_b4.json" if structured else "corpus_b1.json"))
     if not f.exists():
         sys.exit(f"missing {f} — run: python eval/build_corpus.py"
                  f"{' --structured' if structured else ''}")
@@ -72,7 +74,7 @@ def usable_pages():
     return keep
 
 
-def ingest(user, structured, pages_allowed):
+def ingest(user, structured, pages_allowed, corpus_file=None):
     """One retrievable unit per PAGE, id '<file>#pNN'.
 
     Pages, not whole documents: with six PDFs the correct document is trivially rank 1
@@ -82,7 +84,7 @@ def ingest(user, structured, pages_allowed):
     so chunk ids '<file>#p07#2' still resolve back to the page.
     """
     counts = {}
-    for note in load_corpus(structured):
+    for note in load_corpus(structured, corpus_file):
         for pg in note["page_texts"]:
             note_id = f"{note['file']}#p{pg['page']:02d}"
             if note_id not in pages_allowed:
@@ -190,7 +192,7 @@ def main():
         cfg = CONFIGS[name]
         user = f"exp_{name.lower()}_{stamp}"
         print(f"[{name}] {cfg['desc']}")
-        counts = ingest(user, cfg["structured"], allowed)
+        counts = ingest(user, cfg["structured"], allowed, cfg.get("corpus"))
         r = score(user, cases)
         rc_ = score_chunks(user, chunk_cases)
         r["chunks"] = sum(counts.values())

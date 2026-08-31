@@ -25,3 +25,6 @@ env/
 # Cached Gemini page extractions (regenerable, and they contain note content)
 eval/cache/
 eval/corpus/
+
+# B0 working kit: contains the user's note content, regenerable from the corpus
+eval/b0/pages/
