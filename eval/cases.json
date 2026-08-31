@@ -1,0 +1,200 @@
+{
+  "_comment": [
+    "Evaluation set for NoteHandlerRAG. Ground truth is drawn from the notes actually",
+    "stored for the default user; every expectation here was confirmed against a real",
+    "answer before being written down.",
+    "",
+    "kind      : specific | global | absent",
+    "contains  : every string must appear in the answer (keep these robust — proper",
+    "            nouns and numbers, never phrasing the model is free to vary, and never",
+    "            LaTeX-able tokens like 'L2' which the model may render as $L_2$)",
+    "refusal   : true when the topic is absent and the app must decline",
+    "notes     : note ids the answer should be grounded in (retrieval scoring, --local)"
+  ],
+  "cases": [
+    {
+      "id": "bio-mitochondria",
+      "kind": "specific",
+      "question": "粒線體的功能是什麼？",
+      "contains": ["發電廠"],
+      "notes": ["a.txt"]
+    },
+    {
+      "id": "math-onepluslone",
+      "kind": "specific",
+      "question": "1+1 等於多少？",
+      "contains": ["2"],
+      "notes": ["b.txt"]
+    },
+    {
+      "id": "civics-proportionality",
+      "kind": "specific",
+      "question": "比例原則包含哪些子原則？",
+      "contains": ["適當性", "必要性", "衡量性"],
+      "notes": ["Civics_Note.jpg"]
+    },
+    {
+      "id": "civics-goodfaith",
+      "kind": "specific",
+      "question": "誠信原則被稱為什麼？",
+      "contains": ["帝王條款"],
+      "notes": ["Civics_Note.jpg"]
+    },
+    {
+      "id": "civics-trust",
+      "kind": "specific",
+      "question": "信賴保護原則需要滿足哪些條件？",
+      "contains": ["信賴"],
+      "notes": ["Civics_Note.jpg"]
+    },
+    {
+      "id": "civics-legality",
+      "kind": "specific",
+      "question": "依法行政包含哪兩個原則？",
+      "contains": ["法律優越", "法律保留"],
+      "notes": ["Civics_Note.jpg"]
+    },
+    {
+      "id": "civics-constcourt",
+      "kind": "specific",
+      "question": "憲法訴訟法實施後由哪個機關進行違憲審查？",
+      "contains": ["憲法法庭"],
+      "notes": ["Civics_Note.jpg"]
+    },
+    {
+      "id": "geo-wto",
+      "kind": "specific",
+      "question": "WTO 的總部設在哪裡？",
+      "contains": ["日內瓦"],
+      "notes": ["Geographic_Note.jpg"]
+    },
+    {
+      "id": "geo-imf",
+      "kind": "specific",
+      "question": "國際貨幣基金的總部在哪個城市？",
+      "contains": ["華盛頓"],
+      "notes": ["Geographic_Note.jpg"]
+    },
+    {
+      "id": "geo-asean",
+      "kind": "specific",
+      "question": "ASEAN +3 指的是加上哪三個國家？",
+      "contains": ["日", "中", "韓"],
+      "notes": ["Geographic_Note.jpg"]
+    },
+    {
+      "id": "geo-nafta",
+      "kind": "specific",
+      "question": "北美自由貿易協定的成員國有哪些？",
+      "contains": ["美", "墨", "加"],
+      "notes": ["Geographic_Note.jpg"]
+    },
+    {
+      "id": "geo-culture",
+      "kind": "specific",
+      "question": "文化擴散造成什麼結果？",
+      "contains": ["本土文化"],
+      "notes": ["Geographic_Note.jpg"]
+    },
+    {
+      "id": "phys-lagrange",
+      "kind": "specific",
+      "question": "拉格朗日點的題目在問什麼？",
+      "contains": ["拉格朗日"],
+      "notes": ["哈佛高二下二段段複.pdf"]
+    },
+    {
+      "id": "phys-saturn",
+      "kind": "specific",
+      "question": "題目要用哪顆衛星的資料估算土星質量？",
+      "contains": ["泰坦"],
+      "notes": ["哈佛高二下二段段複.pdf"]
+    },
+    {
+      "id": "phys-blinds",
+      "kind": "specific",
+      "question": "百葉窗的那一題在計算什麼？",
+      "contains": ["百葉窗"],
+      "notes": ["哈佛高二下二段段複.pdf"]
+    },
+    {
+      "id": "phys-gravity",
+      "kind": "specific",
+      "question": "萬有引力定律單元包含哪些題型？",
+      "contains": ["萬有引力"],
+      "notes": ["哈佛高二下二段段複.pdf"]
+    },
+    {
+      "id": "global-subjects",
+      "kind": "global",
+      "question": "我的筆記總共涵蓋哪些科目？每個科目分別記了什麼重點？",
+      "contains": ["生物", "公民", "地理", "物理"]
+    },
+    {
+      "id": "global-summary",
+      "kind": "global",
+      "question": "幫我統整所有筆記的重點",
+      "contains": ["公民", "地理"]
+    },
+    {
+      "id": "global-crossnote",
+      "kind": "global",
+      "question": "我的筆記裡有哪些跟國際組織有關的內容？",
+      "contains": ["WTO"]
+    },
+    {
+      "id": "global-each-subject",
+      "kind": "global",
+      "question": "請從每一個科目的筆記中，各舉出一個重點。",
+      "contains": ["生物", "公民", "地理", "物理"]
+    },
+    {
+      "id": "global-compare-bio-geo",
+      "kind": "global",
+      "question": "我的生物筆記和地理筆記分別記了什麼？",
+      "contains": ["蘋果", "香蕉"]
+    },
+    {
+      "id": "global-compare-phys-civics",
+      "kind": "global",
+      "question": "物理和公民的筆記各自涵蓋哪些主題？",
+      "contains": ["萬有引力", "比例原則"]
+    },
+    {
+      "id": "global-organisations",
+      "kind": "global",
+      "question": "把我筆記中所有提到的國際或區域組織全部列出來。",
+      "contains": ["WTO", "APEC", "EU"]
+    },
+    {
+      "id": "absent-photosynthesis",
+      "kind": "absent",
+      "question": "光合作用的暗反應是什麼？",
+      "refusal": true
+    },
+    {
+      "id": "absent-shakespeare",
+      "kind": "absent",
+      "question": "莎士比亞的四大悲劇有哪些？",
+      "refusal": true
+    },
+    {
+      "id": "absent-tang",
+      "kind": "absent",
+      "question": "唐朝的科舉制度如何運作？",
+      "refusal": true
+    },
+    {
+      "id": "absent-python",
+      "kind": "absent",
+      "question": "如何用 Python 寫一個氣泡排序？",
+      "refusal": true
+    },
+    {
+      "id": "absent-trig",
+      "kind": "absent",
+      "question": "三角函數的和差角公式是什麼？",
+      "refusal": true
+    }
+  ]
+}

@@ -456,6 +456,52 @@ def add_pdf_note(user_id: str, file_id: str, pdf_path: str, source: str,
     return description
 
 
+def _join_chunks(rows: list[tuple[str, dict]]) -> str:
+    """Rejoin a note's chunks into its stored text, undoing CHUNK_OVERLAP at each seam.
+
+    Chunks are stored with an overlap so retrieval keeps context across boundaries; when
+    showing or editing the note we want the text back, not the duplicated seams.
+    """
+    rows = sorted(rows, key=lambda r: int((r[1] or {}).get("chunk") or 0))
+    text = ""
+    for doc, _ in rows:
+        doc = doc or ""
+        if not text:
+            text = doc
+            continue
+        # Longest suffix of what we have that is also a prefix of the next chunk.
+        window = min(len(text), len(doc), CHUNK_OVERLAP + 40)
+        overlap = next((k for k in range(window, 0, -1) if text.endswith(doc[:k])), 0)
+        text += doc[overlap:]
+    return text
+
+
+def get_note_text(user_id: str, file_id: str) -> str | None:
+    """Full stored text of a note (None if it doesn't exist)."""
+    collection = get_user_collection(user_id)
+    got = collection.get(include=["documents", "metadatas"])
+    rows = [(d, m) for i, d, m in zip(got["ids"], got["documents"], got["metadatas"])
+            if _base_id(i) == file_id]
+    return _join_chunks(rows) if rows else None
+
+
+def update_note(user_id: str, file_id: str, new_text: str) -> bool:
+    """Replace a note's text with a user-corrected version: re-chunk and re-embed, keeping
+    its type and source. No Gemini call — the description was already generated; this is
+    the human fixing what the model misread. False if the note doesn't exist.
+    """
+    collection = get_user_collection(user_id)
+    got = collection.get(include=["metadatas"])
+    ids = [i for i in got["ids"] if _base_id(i) == file_id]
+    if not ids:
+        return False
+    meta = next((m for i, m in zip(got["ids"], got["metadatas"])
+                 if _base_id(i) == file_id), {}) or {}
+    collection.delete(ids=ids)
+    return _add_note(user_id, file_id, new_text,
+                     meta.get("type", "text"), meta.get("source", file_id))
+
+
 def list_notes(user_id: str) -> list[dict]:
     """One entry per note, aggregating chunked notes (preview = first chunk)."""
     collection = get_user_collection(user_id)
@@ -565,8 +611,32 @@ def _retrieve(user_id: str, question: str, top_k: int = 10) -> list[str]:
     return kept or [scored[0][0]]
 
 
+# Whole-corpus mode. When every note fits comfortably in the model's context window,
+# retrieval can only lose information: any ranking mistake drops a note that would have
+# fitted anyway. Gemini's window is ~1M tokens, so this cap (~20k tokens of Chinese) is
+# far below it and keeps a query cheap, while covering a student's notes for a long time.
+# Above the cap we fall back to retrieval, which is what makes the app keep scaling.
+WHOLE_CORPUS_CHARS = 60_000
+
+
+def _whole_corpus(collection) -> list[str] | None:
+    """Every chunk in stable note order, or None when the corpus is too big to send."""
+    got = collection.get(include=["documents", "metadatas"])
+    docs = got["documents"] or []
+    if not docs or sum(len(d or "") for d in docs) > WHOLE_CORPUS_CHARS:
+        return None
+    metas = got["metadatas"] or [{}] * len(docs)
+    ordered = sorted(
+        zip(got["ids"], docs, metas),
+        key=lambda t: (_base_id(t[0]), int((t[2] or {}).get("chunk") or 0)),
+    )
+    return [d for _, d, _ in ordered if d]
+
+
 def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = None) -> str:
-    docs = _retrieve(user_id, question, top_k)
+    docs = _whole_corpus(get_user_collection(user_id))
+    if docs is None:
+        docs = _retrieve(user_id, question, top_k)
     if not docs:
         return "參考資料中沒有記載相關訊息"
     context = "\n---\n".join(docs)

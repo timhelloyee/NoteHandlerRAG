@@ -1,0 +1,351 @@
+# NoteHandlerRAG — Project Handoff
+
+> **Audience:** another AI assistant picking this project up cold.
+> **Written:** 2026-08-31. **Repo HEAD at writing:** `e51a3cb`.
+> Verify claims against the code before acting — this document ages, the repo doesn't.
+
+---
+
+## 1. What this is
+
+A multimodal **RAG (Retrieval-Augmented Generation) web app over personal study notes**,
+built by a Taiwanese high-school student (`timhelloyee`). The user uploads notes as text,
+images (photos of handwritten notes), or PDFs; asks questions in Traditional Chinese; and
+gets answers generated **only** from their own notes, rendered with Markdown + LaTeX.
+
+The notes are real high-school material: 公民 (civics), 地理 (geography), 生物 (biology),
+物理 (physics). Answers must preserve formulas, so LaTeX fidelity matters throughout.
+
+**Live:** https://timhelloyee-notehandler.hf.space
+
+---
+
+## 2. Where everything lives
+
+| Thing | Location | Notes |
+|---|---|---|
+| Working copy | `C:\Users\user\Desktop\ClaudeProjects\NoteHandler` | **Moved** from `Desktop\PythonProjects` around 2026-08 |
+| GitHub | `github.com/timhelloyee/NoteHandlerRAG` (remote `origin`) | **Still private** |
+| HF Space | `huggingface.co/spaces/timhelloyee/NoteHandler` | Docker SDK, port 7860 |
+| Note data | HF Dataset `timhelloyee/notehandler-store` | **Private. Never committed to git.** |
+| Python env | `C:/Users/user/anaconda3/envs/ragtraining/python.exe` | Has torch+CUDA locally; the Space is CPU-only |
+
+### ⚠️ Deploying means pushing to TWO remotes
+
+```bash
+git push origin main                                          # GitHub
+git push https://<user>:<HF_WRITE_TOKEN>@huggingface.co/spaces/timhelloyee/NoteHandler main:main
+```
+
+A Space push triggers a rebuild. When Docker layers are cached (Python-only change) the
+swap can be nearly invisible — the old container keeps serving and health never drops, so
+**do not poll for downtime to detect a new build**; test the behaviour you changed instead.
+A dependency change takes ~2–3 minutes before `/api/health` returns 200.
+
+---
+
+## 3. Architecture
+
+```
+Browser (app/static/index.html — also copied to docs/index.html for GitHub Pages)
+   │  Google Identity Services sign-in → account email is the user_id
+   │  fetch() → API_BASE ("" same-origin, or the hf.space URL when served from github.io)
+   ▼
+FastAPI (app/main.py)  ── validates, routes, converts upstream failures to clean HTTP codes
+   ▼
+RAG core (app/rag_core.py)
+   ├─ embeddings : intfloat/multilingual-e5-base  (SentenceTransformer, "passage:"/"query:" prefixes)
+   ├─ vector DB  : ChromaDB, one collection per user, HNSW index, squared-L2 space
+   ├─ vision+LLM : Google Gemini (selectable model, 2 API keys with fail-over)
+   └─ persistence: private HF Dataset — restore on startup, push after every write
+```
+
+### The persistence model is the single most important thing to understand
+
+HF Space storage is **ephemeral**. So:
+
+- **Nothing** is baked into the Docker image and **nothing** is committed to git.
+- On startup, `_restore_from_dataset()` downloads the whole `vectorstores/` tree from the
+  private Dataset.
+- After every add/delete, `_persist_user()` re-uploads that user's folder.
+
+**Consequence:** if the Space's `HF_TOKEN` secret is missing, invalid, or lacks access to
+the private Dataset, **the app boots with an empty note list.** There is no baked-in seed
+to fall back on. This is the #1 cause of "my notes disappeared".
+
+This design was deliberate: `vectorstores/<user>` is named after the user's email and the
+Chroma SQLite contains their note text. The repo is destined to be public, so the data was
+purged from git history with `git filter-repo` and force-pushed.
+
+---
+
+## 4. Request flows
+
+### `POST /api/query`
+1. `resolve_model(req.model)` → allowlist check, falls back to default.
+2. `_retrieve()`: embed question → Chroma `query()` (`documents`, `distances`, `metadatas`)
+   → keyword boost → relevance gate → relative-margin selection. **See §5.**
+3. Chunks joined with `\n---\n` into `PROMPT_TEMPLATE`, which is filled with `.replace()`
+   **not** `str.format()` — the template contains literal `{}` from LaTeX examples.
+4. `_llm_invoke()` with key fail-over; `ModelUnavailableError` → HTTP 503.
+5. Returns `{answer, model}` — the echoed model is what actually ran.
+
+### `POST /api/upload` (multipart: `user_id`, `file`, `model`)
+- `.txt/.md` → `_decode_text()` tries `utf-8-sig`, `cp950`, `gb18030` (Windows Notepad in
+  Taiwan writes Big5); undecodable → 415.
+- images / PDF → Gemini vision describes the file into Traditional Chinese text (subject
+  tag + faithful content + LaTeX + a trailing `關鍵字：` line), then `_clean_description()`,
+  then chunk + embed + store.
+- Duplicate detection checks **both** the bare id and `<id>#0` (whole-doc and chunked forms).
+
+### Other endpoints
+`GET /api/models` (dropdown source of truth + default) · `GET /api/notes` (aggregated,
+one row per note) · `DELETE /api/notes/{id}` (deletes all chunks, 404 if absent) ·
+`GET /api/health` · `GET /` (serves the UI).
+
+---
+
+## 5. Retrieval tuning — read this before touching the numbers
+
+These constants were **measured**, not guessed. Re-measure before changing them.
+
+```python
+CHUNK_CHARS = 450 ; CHUNK_OVERLAP = 50     # sentence-aligned
+KEYWORD_BONUS = 0.03 ; KEYWORD_BONUS_CAP = 3
+RELEVANCE_CEILING = 0.38                    # gates the QUERY
+RELATIVE_MARGIN  = 0.10                     # selects HOW MANY chunks
+```
+
+**Chroma reports squared L2 over normalized vectors — exactly `2 − 2·cos`.** Confirmed
+empirically (`configuration_json` shows `space: 'l2'`; distance equals `2-2cos` to 4 dp).
+So a distance of 0.35 means cosine similarity 0.825.
+
+Measured on the real corpus:
+
+| Query type | Best (min) distance |
+|---|---|
+| Answer **is** in the notes | 0.20 – 0.36 |
+| Topic **absent** from the notes | 0.37 + |
+
+e5 similarities are range-compressed: unrelated Traditional Chinese still scores ~0.77
+cosine. So the two populations are close, and the separation is narrow (~0.02).
+
+**A bug that was fixed here — do not reintroduce it.** The original code had a single
+`MAX_DISTANCE = 0.35` applied as a **per-chunk filter**. Because genuine answers sit at
+0.33–0.36, almost nothing ever cleared it, and the `kept or [best]` fallback silently
+reduced the system to **top-1 retrieval**. Symptom: broad questions like
+「我的筆記涵蓋哪些科目？」 returned **1 of 4 subjects**, and *raising `top_k` changed
+nothing* (identical byte-for-byte answers at k=10/30/60) because the filter, not `top_k`,
+was binding.
+
+The fix splits the one number into the two jobs it was conflating:
+
+1. **`RELEVANCE_CEILING` gates the query.** If even the best chunk exceeds it, nothing is
+   on topic → return just that chunk and let the prompt's 「沒有記載相關訊息」 rule fire.
+2. **`RELATIVE_MARGIN` picks how many.** Keep everything within `best + 0.10`. This adapts:
+   a clear winner stays tight (粒線體 → 1 chunk), a broad question keeps everything it
+   matched evenly (→ 5–6 chunks). It also survives an embedding-model change, which an
+   absolute per-chunk cutoff does not.
+
+Result: the global question now covers **4/4 subjects**; specific questions return 1–3
+chunks; absent topics still correctly refuse.
+
+### Chunk id scheme (both shapes coexist)
+- Single-chunk note → bare id, e.g. `a.txt`
+- Multi-chunk note → `<file>#0`, `<file>#1`, … ; `_base_id()` maps back
+- Notes ingested **before** chunking are still stored whole. `list_notes`/`delete_note`
+  handle both. Don't assume every note is chunked.
+
+---
+
+## 6. Model selection
+
+`AVAILABLE_MODELS` in `rag_core.py` — **ids verified against the live `models.list()`
+endpoint**, not guessed:
+
+`gemini-3.7-flash` · `gemini-3.6-flash` · `gemini-3.5-flash` · `gemini-3.5-flash-lite` ·
+`gemini-3.1-flash-lite` *(default)* · `gemini-3-flash-preview` · `gemini-2.5-flash`
+
+⚠️ **"Gemini 3 Flash" exists only as `gemini-3-flash-preview`** — there is no plain
+`gemini-3-flash`. Do not "correct" it.
+
+The dropdown chooses the model for **both** answering and image/PDF parsing. The frontend
+populates from `/api/models` (with a hardcoded fallback list if the backend is asleep);
+`resolve_model()` validates server-side, so an unknown id silently becomes the default and
+an unvetted string never reaches Google. Chat clients are cached per `(model, key)`.
+
+Popular models intermittently return **503 "high demand"** — this is normal upstream
+behaviour, not a bug. `_is_retryable()` covers quota *and* transient errors; exhausting
+both keys raises `ModelUnavailableError` → HTTP 503 with a message telling the user to
+retry or switch model.
+
+---
+
+## 7. Frontend notes (`app/static/index.html`)
+
+Single self-contained page; `docs/index.html` is a **manual copy** for GitHub Pages —
+**after editing one, `cp app/static/index.html docs/index.html`.** They drift silently.
+
+- **Auth:** Google Identity Services. The account email becomes `user_id`, remembered in
+  `localStorage` (`nh_user`) with a 登出 link. Model choice persists as `nh_model`.
+- **⚠️ Google sign-in cannot complete inside the HF Spaces iframe** — the popup at
+  `accounts.google.com/gsi/transform` hangs blank because FedCM is blocked in cross-origin
+  iframes and HF controls the wrapper. **The Space must be opened in its own tab.** This is
+  not fixable from our side.
+- OAuth Client ID is public and in the source (safe). Origins must be registered in Google
+  Cloud Console — `origin_mismatch` (HTTP 400) means the current origin is missing.
+- **Rendering:** `renderRich()` for answers (full Markdown + MathJax), `renderInline()` for
+  note previews (inline-only; headings→bold, rules dropped, dangling `$…` trimmed). LaTeX
+  spans are stashed before `marked` runs so `$m_1$` isn't mangled by underscore handling,
+  then restored. DOMPurify sanitizes.
+- `errText()` extracts a readable message from JSON error bodies — previously showed the
+  useless `[object Object]`.
+
+---
+
+## 8. Configuration
+
+Local: `.env` (git-ignored; see `.env.example`). Space: **Settings → Secrets**.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY_PRIMARY` / `_SECONDARY` | **Yes** — import fails without them | Two keys, automatic fail-over |
+| `HF_TOKEN` | Effectively yes | Must read/write the private Dataset, else the app starts empty |
+| `VECTORSTORE_DATASET` | No | Default `timhelloyee/notehandler-store` |
+| `VECTORSTORE_ROOT` | No | Default `./vectorstores` |
+| `ALLOWED_ORIGINS` | No | CORS; defaults include `https://timhelloyee.github.io` |
+| `GEMINI_MODEL` | No | Overrides the default model |
+
+`requirements.txt` is **deliberately bounded**, notably `chromadb>=1.5,<2` — a major
+upgrade on a Space rebuild could make the persisted store unreadable. Don't unpin casually.
+
+---
+
+## 9. Testing approach
+
+There is **no test suite in the repo**. Verification has been done with throwaway scripts
+in the scratchpad, using `fastapi.testclient.TestClient` against the local store with
+`HF_TOKEN=""` (which disables Dataset sync so tests never touch production data).
+
+Patterns that work:
+- `os.environ["HF_TOKEN"] = ""` **before** importing `app.main`, plus `sys.path.insert` and
+  `os.chdir` to the project root.
+- `load_dotenv()` fails when a script is piped via stdin (`find_dotenv` assertion) — write
+  the script to a file instead of using a heredoc.
+- The Bash tool's cwd is `ClaudeProjects`; use forward-slash paths.
+- Set `PYTHONIOENCODING=utf-8` or Chinese output becomes mojibake in the terminal.
+
+Suites that have passed: 17 model/allowlist/caching checks; 18 chunking/keyword/aggregation
+checks; 7 end-to-end filter checks (present / global / absent); live Space checks.
+
+---
+
+## 10. History — what was done and why
+
+Roughly chronological. Details are in `git log`, which has real messages.
+
+1. **Notebooks → web app.** Originally Jupyter notebooks using CLIP for embeddings.
+   Replaced with e5-base (CLIP is weak on Chinese and truncates at 77 tokens) and
+   refactored into `app/` (FastAPI + static page).
+2. **Model IDs** updated to `gemini-3.1-flash-lite` throughout.
+3. **Google sign-in** added; the manual user-id box was removed, so the email is the only
+   identity. `_safe_name()` sanitizes it for Chroma (`@`→`_`), since collection names allow
+   only `[a-zA-Z0-9._-]`. `timhelloyee@gmail.com` → `timhelloyee_gmail.com`.
+4. **Deployed** to HF Spaces (Docker) + GitHub, frontend copy in `docs/` for Pages.
+5. **Privacy fix (important).** The seeded vectorstore had been committed — it exposed the
+   user's email in a directory name and their note text in SQLite. Removed from the working
+   tree, purged from history with `git filter-repo`, force-pushed to both remotes, and
+   replaced with the private-Dataset persistence described in §3.
+6. **Formatting cleanup**, iteratively, driven by screenshots: bold/LaTeX in previews →
+   headings and `---` normalized → box glyphs (`□`) and `** x **` stripped at ingest →
+   `…` appended when a preview is truncated.
+7. **Hardening pass:** Big5/GB18030 upload decoding, dependency bounds, model baked into
+   the image for fast cold starts, sign-in persistence, 404 on missing delete,
+   `/api/health`, rewritten README (it had gone stale describing the CLIP era, and it is
+   also the Space's landing card), `.env.example`, MIT `LICENSE`.
+8. **RAG quality pass** — see §11 for the source analysis: chunking + keyword anchors.
+9. **Model selector** — dropdown, `/api/models`, allowlist, 503 handling.
+10. **Retrieval filter fix** — the top-1 collapse described in §5.
+
+---
+
+## 11. Research the user has evaluated (and the conclusions reached)
+
+The user is exploring RAG techniques, likely for a science-fair / 專題 project, and has
+asked for analysis of external sources. Conclusions so far — **don't re-litigate these
+without new evidence**:
+
+**Source A — NPHSF science-fair paper, "結合 LSH 及知識圖譜改善 RAG".**
+- *Adopted:* **chunking** (the paper's own weakest metric, recall 82%, is explicitly blamed
+  on not chunking) and **LLM keyword extraction** (reused as free ranking anchors).
+- *Rejected:* **LSH** — Chroma already indexes with HNSW, a strictly better ANN algorithm,
+  so this would rebuild a weaker version of what's already running; its "95% faster" claim
+  is measured against GraphRAG, not against plain vector search. **Knowledge graph** — the
+  paper's own citations report ~10× tokens and $11 to index one 30k-word book. Its
+  **metrics** are LLM-judged on n=10 with a non-standard precision definition.
+
+**Source B — iThome article on Microsoft GraphRAG.** Same family as A, heavier.
+- *Verdict:* **right diagnosis, wrong scale.** It correctly identifies that top-k retrieval
+  fails "global" questions — which was **verified true here** (1/4 subjects). But community
+  summaries exist to compress a corpus that *can't* fit in context. This corpus is ~15–25k
+  characters and Gemini takes ~1M tokens, so **putting every note in the prompt beats any
+  summary hierarchy** — no information loss, one call, no indexing pipeline.
+- Investigating this is what surfaced the retrieval-filter bug, which was the real cause.
+
+**Source C — advice to research HNSW's incremental-insertion degradation / tombstone
+deletion, or filtered ANN search.**
+- The advice does **not** claim HNSW is unsuitable here; it proposes research topics.
+- Measured: NoteHandler **already uses HNSW** (Chroma default). Exact brute force over
+  10k×768 vectors takes **1.3 ms**, 100k takes 12 ms — versus 1–5 s for the Gemini call. At
+  a realistic ceiling of ~10k chunks after years of use, indexing is irrelevant either way,
+  and tombstones are a non-issue given rare deletes plus a natural whole-store rebuild
+  point in the Dataset sync cycle.
+- *Verdict:* a legitimate and genuinely hard **research topic** (filtered ANN is an open
+  problem, and it's a stronger topic than Source A) — but it would use NoteHandler only as
+  a motivating story, needing 100k+ synthetic vectors and a recall benchmark. It is **not**
+  an improvement to the app.
+
+**Recurring theme:** every one of these was settled by *measuring*, not by reasoning from
+priors. Model IDs were checked against `models.list()`; the distance metric was confirmed
+to be `2-2cos`; the filter bug was found by noticing `top_k` had no effect. Keep doing that.
+
+---
+
+## 12. Open items
+
+**User-side (cannot be done from code):**
+1. **Rotate the exposed credentials.** Multiple HF tokens and the Gemini/LangChain/OpenAI
+   keys were pasted into chat during development. ⚠️ If `HF_TOKEN` is rotated, update the
+   **Space secret** too or the app boots with no notes.
+2. **Repo is still private and GitHub Pages is not enabled.** To publish: make it public →
+   Settings → Pages → `main` `/docs` → add `https://timhelloyee.github.io` to the Google
+   OAuth authorized JavaScript origins. CORS already allows that origin.
+
+**Known limitations / candidate work:**
+3. **No real authorization.** The backend trusts whatever `user_id` it receives — anyone
+   can read anyone's notes by supplying the email. Fix would be verifying the Google ID
+   token server-side rather than decoding it in the browser.
+4. **Frontend duplication** — `app/static/index.html` and `docs/index.html` are kept in sync
+   by hand.
+5. **Whole-corpus mode for aggregative questions** — the remaining idea from the GraphRAG
+   analysis: when a user's notes fit in context, skip retrieval entirely. Less urgent now
+   that the filter is fixed.
+6. **Persistence is coarse** — the whole user folder is re-uploaded after each write, and
+   concurrent uploads could race. Fine for one user, not for many.
+7. **Free-tier scaling** — CPU-only, and every write is a Dataset round trip.
+8. **`embed_folder.py` is a local CLI, not used by the app**, and chunks with a *different*
+   id scheme (`a.txt#0` at 140 chars). Pointing it at the app's store would duplicate
+   content. The notebooks (`NoteHandler_Input.ipynb`, `NoteHandler_opus_Output.ipynb`) are
+   likewise historical.
+
+---
+
+## 13. Working style the user expects
+
+- **Measure before claiming.** They have corrected wrong assumptions before (e.g. insisting
+  `gemini-3.1-flash-lite` existed when it was dismissed as a typo — they were right).
+- **Don't push without being asked** when they've said to pause; they will say "continue".
+- They review screenshots and report visual bugs precisely — expect UI polish iterations.
+- They care about privacy of their own data (this drove the history purge).
+- Mixed English/Chinese; UI strings and prompts are **Traditional Chinese** — keep them so.
+- Deploy = **two remotes**. Forgetting the HF push means the live app silently lags GitHub.

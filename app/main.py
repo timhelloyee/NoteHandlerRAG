@@ -139,6 +139,34 @@ def notes(user_id: str):
     return rag_core.list_notes(user_id)
 
 
+class NoteUpdate(BaseModel):
+    user_id: str
+    content: str
+
+
+@app.get("/api/notes/{file_id}")
+def note_text(file_id: str, user_id: str):
+    """Full stored text of one note, for review and editing."""
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    text = rag_core.get_note_text(user_id, file_id)
+    if text is None:
+        raise HTTPException(status_code=404, detail=f"找不到筆記：{file_id}")
+    return {"id": file_id, "text": text}
+
+
+@app.put("/api/notes/{file_id}")
+def edit_note(file_id: str, req: NoteUpdate):
+    """Save a corrected extraction. Re-chunks and re-embeds; no Gemini call."""
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not req.content.strip():
+        raise HTTPException(status_code=400, detail="筆記內容不可為空")
+    if not rag_core.update_note(req.user_id, file_id, req.content):
+        raise HTTPException(status_code=404, detail=f"找不到筆記：{file_id}")
+    return {"id": file_id, "updated": True}
+
+
 @app.delete("/api/notes/{file_id}")
 def remove_note(file_id: str, user_id: str):
     if not rag_core.delete_note(user_id, file_id):

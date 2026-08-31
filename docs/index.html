@@ -112,6 +112,16 @@
       background: #fff; color: var(--danger); border: 1px solid #f1c4c4; box-shadow: none;
     }
     button.del:hover { background: var(--danger); color: #fff; border-color: var(--danger); box-shadow: 0 3px 10px rgba(220,38,38,.3); }
+    button.edit {
+      margin-top: 0; padding: .35rem .75rem; font-size: .8rem; flex: none;
+      background: #fff; color: var(--accent); border: 1px solid #c7d2fe; box-shadow: none;
+    }
+    button.edit:hover { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 3px 10px rgba(79,70,229,.3); }
+    #notes li { flex-wrap: wrap; }
+    .note-actions { display: flex; gap: .4rem; flex: none; }
+    .editor { flex-basis: 100%; margin-top: .6rem; }
+    .editor textarea { min-height: 220px; font-size: .9rem; line-height: 1.5; }
+    .editor .hint { margin: .35rem 0 0; }
   </style>
   <script>
     // MathJax must be configured before its script loads.
@@ -349,14 +359,81 @@
         renderInline(preview, n.preview);
         meta.appendChild(tag);
         meta.appendChild(preview);
+        const actions = document.createElement("div");
+        actions.className = "note-actions";
+        const edit = document.createElement("button");
+        edit.className = "edit";
+        edit.textContent = "編輯";
+        edit.addEventListener("click", () => openEditor(li, n.id));
         const del = document.createElement("button");
         del.className = "del";
         del.textContent = "刪除";
         del.addEventListener("click", () => deleteNote(n.id));
+        actions.appendChild(edit);
+        actions.appendChild(del);
         li.appendChild(meta);
-        li.appendChild(del);
+        li.appendChild(actions);
         ul.appendChild(li);
       }
+    }
+
+    // Editing the extracted text. Gemini's transcription of a handwritten note is a
+    // guess; letting the user correct it once fixes every future answer, and costs no
+    // API call — saving only re-chunks and re-embeds.
+    async function openEditor(li, id) {
+      if (li.querySelector(".editor")) return;   // already open
+      const box = document.createElement("div");
+      box.className = "editor";
+      box.innerHTML = "<p class='muted'>載入中…</p>";
+      li.appendChild(box);
+      let text;
+      try {
+        const res = await fetch(API_BASE + "/api/notes/" + encodeURIComponent(id)
+          + "?user_id=" + encodeURIComponent(userId()));
+        const data = await res.json();
+        if (!res.ok) throw new Error(errText(data, res));
+        text = data.text;
+      } catch (e) {
+        box.innerHTML = "";
+        box.appendChild(Object.assign(document.createElement("p"),
+          { className: "muted", textContent: "載入失敗：" + e.message }));
+        return;
+      }
+      box.innerHTML = "";
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      const save = document.createElement("button");
+      save.textContent = "儲存";
+      const cancel = document.createElement("button");
+      cancel.className = "edit";
+      cancel.textContent = "取消";
+      cancel.style.marginLeft = ".5rem";
+      const hint = document.createElement("p");
+      hint.className = "muted hint";
+      hint.textContent = "修正辨識錯誤（例如公式或數字）後儲存，之後的回答就會使用更正後的內容。";
+      save.addEventListener("click", async () => {
+        save.disabled = true;
+        hint.textContent = "儲存中…";
+        try {
+          const res = await fetch(API_BASE + "/api/notes/" + encodeURIComponent(id), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ user_id: userId(), content: ta.value }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(errText(data, res));
+          box.remove();
+          loadNotes();
+        } catch (e) {
+          hint.textContent = "儲存失敗：" + e.message;
+          save.disabled = false;
+        }
+      });
+      cancel.addEventListener("click", () => box.remove());
+      box.appendChild(ta);
+      box.appendChild(save);
+      box.appendChild(cancel);
+      box.appendChild(hint);
     }
 
     async function deleteNote(id) {
