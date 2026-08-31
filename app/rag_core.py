@@ -620,17 +620,24 @@ WHOLE_CORPUS_CHARS = 60_000
 
 
 def _whole_corpus(collection) -> list[str] | None:
-    """Every chunk in stable note order, or None when the corpus is too big to send."""
+    """One entry per note — chunks rejoined, overlaps removed — or None when the corpus
+    is too big to send whole.
+
+    Deliberately *not* the raw chunk list: chunks overlap by CHUNK_OVERLAP, so feeding
+    them verbatim would repeat text at every seam and split each note across arbitrary
+    450-char boundaries. Rejoining restores the note as it was extracted, which keeps the
+    document's own structure (headings, numbered questions) intact for the model.
+    """
     got = collection.get(include=["documents", "metadatas"])
     docs = got["documents"] or []
     if not docs or sum(len(d or "") for d in docs) > WHOLE_CORPUS_CHARS:
         return None
     metas = got["metadatas"] or [{}] * len(docs)
-    ordered = sorted(
-        zip(got["ids"], docs, metas),
-        key=lambda t: (_base_id(t[0]), int((t[2] or {}).get("chunk") or 0)),
-    )
-    return [d for _, d, _ in ordered if d]
+    by_note: dict[str, list[tuple[str, dict]]] = {}
+    for id_, doc, meta in zip(got["ids"], docs, metas):
+        by_note.setdefault(_base_id(id_), []).append((doc, meta or {}))
+    return [text for _, rows in sorted(by_note.items())
+            if (text := _join_chunks(rows))]
 
 
 def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = None) -> str:
