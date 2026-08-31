@@ -505,12 +505,26 @@ PROMPT_TEMPLATE = """你是一個專業的學習筆記問答助手。請「僅�
 【回答】"""
 
 
-# Drop retrieved chunks whose cosine distance exceeds this cutoff. With normalized
-# E5 embeddings, relevant chunks sit around 0.2–0.3 while unrelated ones are 0.4+.
-# Filtering keeps recall (top_k stays high) but removes noise that distracts the
-# lighter LLM (gemini-3.1-flash-lite) into falsely answering "no info" when the
-# relevant snippet is short and buried among many irrelevant chunks.
-MAX_DISTANCE = 0.35
+# Chunk selection takes two steps, because one number cannot do both jobs.
+#
+# Chroma reports squared L2 over normalized vectors — exactly 2-2·cos — and e5
+# similarities are range-compressed (unrelated Traditional Chinese still scores ~0.77
+# cosine). Measured against real notes: a question whose answer IS present has a best
+# distance of 0.20-0.36, while a question about an absent topic bottoms out at 0.37+.
+#
+# 1. RELEVANCE_CEILING gates the *query*. If even the best chunk is past it, nothing in
+#    the notes is on topic, so hand over only that chunk and let the prompt's
+#    "沒有記載相關訊息" rule fire rather than burying the model in unrelated notes.
+# 2. RELATIVE_MARGIN then decides *how many* chunks to keep, measured from the best hit.
+#    This adapts to the query — a clear winner stays tight, a broad question matching
+#    many notes evenly keeps them all — and it survives changing the embedding model,
+#    which a fixed per-chunk cutoff does not.
+#
+# The previous single MAX_DISTANCE=0.35 conflated the two: as a per-chunk filter it sat
+# below almost every genuine answer, so nearly every query collapsed to the single-best
+# fallback and broad questions ("涵蓋哪些科目") saw exactly one note.
+RELEVANCE_CEILING = 0.38
+RELATIVE_MARGIN = 0.10
 
 
 # Keyword-overlap boost: stored keywords that literally appear in the question lower
@@ -544,8 +558,10 @@ def _retrieve(user_id: str, question: str, top_k: int = 10) -> list[str]:
         zip(docs, (_effective_distance(d, m, question) for d, m in zip(dists, metas))),
         key=lambda x: x[1],
     )
-    # Keep only relevant chunks, but always keep the single best one as a fallback.
-    kept = [doc for doc, eff in scored if eff <= MAX_DISTANCE]
+    best = scored[0][1]
+    if best > RELEVANCE_CEILING:
+        return [scored[0][0]]  # nothing on topic — one chunk is context enough to refuse
+    kept = [doc for doc, eff in scored if eff <= best + RELATIVE_MARGIN]
     return kept or [scored[0][0]]
 
 
