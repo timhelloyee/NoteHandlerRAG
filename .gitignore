@@ -28,3 +28,6 @@ eval/corpus/
 
 # B0 working kit: contains the user's note content, regenerable from the corpus
 eval/b0/pages/
+eval/b0/pages v2/
+eval/b0/*_校正問題.md
+eval/RESULTS_gating.txt
