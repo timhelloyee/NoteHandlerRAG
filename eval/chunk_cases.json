@@ -12,71 +12,219 @@
     "pages on plant hormones, 10 history pages on modern China, 21 C++ pages — because",
     "that is where chunking can actually change the ranking.",
     "",
-    "page: gold page id, matching the '<file>#pNN' units the experiment ingests"
+    "page: gold page id, matching the '<file>#pNN' units the experiment ingests",
+    "",
+    "2026-08-31 correction: cs-pointer and cs-structured-binding originally used the",
+    "spans 記憶體位址 and 結構化綁定. Manual correction against the manuscript showed",
+    "neither phrase is written on the page — Gemini added them in B1. Verified: 記憶體位址",
+    "appears in B1's text only, 結構化綁定 in B1 and B4 only, both absent from B0. Those",
+    "probes therefore scored extraction invention, not retrieval, and penalised whichever",
+    "config was more faithful. Spans replaced with terms present in all three corpora and",
+    "unique to one page each."
   ],
   "cases": [
-    {"id": "bio-acid-growth", "type": "fact", "page": "一下生物三段_compressed.pdf#p09",
-     "question": "生長素促進細胞伸長的機制是哪一個假說？", "span": "酸生長假說"},
-    {"id": "bio-darwin-oat", "type": "fact", "page": "一下生物三段_compressed.pdf#p10",
-     "question": "達爾文做向光性實驗用的是什麼材料？", "span": "燕麥芽鞘"},
-    {"id": "bio-zeatin", "type": "hierarchy", "page": "一下生物三段_compressed.pdf#p12",
-     "question": "細胞分裂素包含哪些種類？", "span": "玉米素"},
-    {"id": "bio-triple", "type": "fact", "page": "一下生物三段_compressed.pdf#p14",
-     "question": "乙烯造成的三重反應是什麼？", "span": "三重反應"},
-    {"id": "bio-hsp", "type": "fact", "page": "一下生物三段_compressed.pdf#p17",
-     "question": "熱休克蛋白有哪些種類？", "span": "HSP90"},
-    {"id": "bio-aril", "type": "hierarchy", "page": "一下生物三段_compressed.pdf#p07",
-     "question": "什麼是假種皮？", "span": "假種皮"},
-    {"id": "bio-hypogeal", "type": "hierarchy", "page": "一下生物三段_compressed.pdf#p04",
-     "question": "子葉不出土型的萌發過程是怎樣？", "span": "子葉不出土型"},
-    {"id": "bio-stone-cell", "type": "fact", "page": "一下生物三段_compressed.pdf#p06",
-     "question": "果皮中的石細胞出現在哪些水果？", "span": "石細胞"},
-
-    {"id": "hist-aigun", "type": "fact", "page": "一下歷史三段.pdf#p02",
-     "question": "英法聯軍期間與俄國簽訂了什麼條約？", "span": "璦琿條約"},
-    {"id": "hist-triple-intervention", "type": "fact", "page": "一下歷史三段.pdf#p03",
-     "question": "甲午戰後日本被迫歸還遼東半島是什麼事件？", "span": "三國干涉還遼"},
-    {"id": "hist-northeast", "type": "fact", "page": "一下歷史三段.pdf#p07",
-     "question": "北伐之後促成全國統一的關鍵事件是什麼？", "span": "東北易幟"},
-    {"id": "hist-xian", "type": "fact", "page": "一下歷史三段.pdf#p08",
-     "question": "張學良發動了什麼事變？", "span": "西安事變"},
-    {"id": "hist-leap", "type": "hierarchy", "page": "一下歷史三段.pdf#p10",
-     "question": "毛澤東時期推動了哪些政治與經濟運動？", "span": "大躍進"},
-    {"id": "hist-meiji", "type": "hierarchy", "page": "一下歷史三段.pdf#p04",
-     "question": "明治維新採取了哪些改革措施？", "span": "廢藩置縣"},
-
-    {"id": "cs-setprecision", "type": "fact", "page": "lv.0_compressed.pdf#p03",
-     "question": "C++ 要控制浮點數輸出的小數位數要用什麼？", "span": "setprecision"},
-    {"id": "cs-bubble", "type": "hierarchy", "page": "lv.0_compressed.pdf#p09",
-     "question": "筆記裡介紹了哪些排序法？", "span": "泡泡排序法"},
-    {"id": "cs-pointer", "type": "fact", "page": "lv.0_compressed.pdf#p08",
-     "question": "指標變數裡面存的是什麼？", "span": "記憶體位址"},
-    {"id": "cs-structured-binding", "type": "fact", "page": "lv.0_compressed.pdf#p15",
-     "question": "C++ 的結構化綁定怎麼使用？", "span": "結構化綁定"},
-    {"id": "cs-argv", "type": "fact", "page": "lv.0_compressed.pdf#p16",
-     "question": "main 函數可以接哪些命令列參數？", "span": "argc"},
-    {"id": "cs-undefined", "type": "hierarchy", "page": "lv.0_compressed.pdf#p17",
-     "question": "競賽程式常見的錯誤類型有哪些？", "span": "未定義行為"},
-
-    {"id": "es-younger-dryas", "type": "fact", "page": "一下地科三段.pdf#p05",
-     "question": "冰芯記錄中突然變冷的事件叫什麼？", "span": "新仙女木事件"},
-    {"id": "es-kyoto", "type": "hierarchy", "page": "一下地科三段.pdf#p06",
-     "question": "有哪些國際氣候協議？", "span": "京都議定書"},
-    {"id": "es-treering", "type": "hierarchy", "page": "一下地科三段.pdf#p04",
-     "question": "研究古氣候可以用哪些指標？", "span": "樹木生長輪"},
-    {"id": "es-precession", "type": "fact", "page": "一下地科三段.pdf#p03",
-     "question": "米蘭科維奇循環包含地軸的什麼運動？", "span": "進動"},
-
-    {"id": "civ-appeal", "type": "fact", "page": "一下公民三段.pdf#p02",
-     "question": "提起行政訴訟前必須先經過什麼程序？", "span": "訴願前置原則"},
-    {"id": "civ-legality", "type": "hierarchy", "page": "一下公民三段.pdf#p03",
-     "question": "刑法的基本原則是什麼？", "span": "罪刑法定"},
-
-    {"id": "phys-lagrange", "type": "fact", "page": "哈佛高二下二段段複.pdf#p02",
-     "question": "James Webb 太空望遠鏡位於哪一個點？", "span": "拉格朗日點"},
-    {"id": "phys-areal", "type": "fact", "page": "哈佛高二下二段段複.pdf#p01",
-     "question": "連線掃過的面積速率怎麼求？", "span": "面積速率"},
-    {"id": "phys-atomic", "type": "fact", "page": "哈佛高二下二段段複.pdf#p03",
-     "question": "原子力與位置關係的那一題在問什麼？", "span": "原子力"}
+    {
+      "id": "bio-acid-growth",
+      "type": "fact",
+      "page": "一下生物三段_compressed.pdf#p09",
+      "question": "生長素促進細胞伸長的機制是哪一個假說？",
+      "span": "酸生長假說"
+    },
+    {
+      "id": "bio-darwin-oat",
+      "type": "fact",
+      "page": "一下生物三段_compressed.pdf#p10",
+      "question": "達爾文做向光性實驗用的是什麼材料？",
+      "span": "燕麥芽鞘"
+    },
+    {
+      "id": "bio-zeatin",
+      "type": "hierarchy",
+      "page": "一下生物三段_compressed.pdf#p12",
+      "question": "細胞分裂素包含哪些種類？",
+      "span": "玉米素"
+    },
+    {
+      "id": "bio-triple",
+      "type": "fact",
+      "page": "一下生物三段_compressed.pdf#p14",
+      "question": "乙烯造成的三重反應是什麼？",
+      "span": "三重反應"
+    },
+    {
+      "id": "bio-hsp",
+      "type": "fact",
+      "page": "一下生物三段_compressed.pdf#p17",
+      "question": "熱休克蛋白有哪些種類？",
+      "span": "HSP90"
+    },
+    {
+      "id": "bio-aril",
+      "type": "hierarchy",
+      "page": "一下生物三段_compressed.pdf#p07",
+      "question": "什麼是假種皮？",
+      "span": "假種皮"
+    },
+    {
+      "id": "bio-hypogeal",
+      "type": "hierarchy",
+      "page": "一下生物三段_compressed.pdf#p04",
+      "question": "子葉不出土型的萌發過程是怎樣？",
+      "span": "子葉不出土型"
+    },
+    {
+      "id": "bio-stone-cell",
+      "type": "fact",
+      "page": "一下生物三段_compressed.pdf#p06",
+      "question": "果皮中的石細胞出現在哪些水果？",
+      "span": "石細胞"
+    },
+    {
+      "id": "hist-aigun",
+      "type": "fact",
+      "page": "一下歷史三段.pdf#p02",
+      "question": "英法聯軍期間與俄國簽訂了什麼條約？",
+      "span": "璦琿條約"
+    },
+    {
+      "id": "hist-triple-intervention",
+      "type": "fact",
+      "page": "一下歷史三段.pdf#p03",
+      "question": "甲午戰後日本被迫歸還遼東半島是什麼事件？",
+      "span": "三國干涉還遼"
+    },
+    {
+      "id": "hist-northeast",
+      "type": "fact",
+      "page": "一下歷史三段.pdf#p07",
+      "question": "北伐之後促成全國統一的關鍵事件是什麼？",
+      "span": "東北易幟"
+    },
+    {
+      "id": "hist-xian",
+      "type": "fact",
+      "page": "一下歷史三段.pdf#p08",
+      "question": "張學良發動了什麼事變？",
+      "span": "西安事變"
+    },
+    {
+      "id": "hist-leap",
+      "type": "hierarchy",
+      "page": "一下歷史三段.pdf#p10",
+      "question": "毛澤東時期推動了哪些政治與經濟運動？",
+      "span": "大躍進"
+    },
+    {
+      "id": "hist-meiji",
+      "type": "hierarchy",
+      "page": "一下歷史三段.pdf#p04",
+      "question": "明治維新採取了哪些改革措施？",
+      "span": "廢藩置縣"
+    },
+    {
+      "id": "cs-setprecision",
+      "type": "fact",
+      "page": "lv.0_compressed.pdf#p03",
+      "question": "C++ 要控制浮點數輸出的小數位數要用什麼？",
+      "span": "setprecision"
+    },
+    {
+      "id": "cs-bubble",
+      "type": "hierarchy",
+      "page": "lv.0_compressed.pdf#p09",
+      "question": "筆記裡介紹了哪些排序法？",
+      "span": "泡泡排序法"
+    },
+    {
+      "id": "cs-pointer",
+      "type": "fact",
+      "page": "lv.0_compressed.pdf#p08",
+      "question": "指標變數裡面存的是什麼？",
+      "span": "pointer of int"
+    },
+    {
+      "id": "cs-structured-binding",
+      "type": "fact",
+      "page": "lv.0_compressed.pdf#p15",
+      "question": "C++ 要怎麼把 tuple 的值一次拆給多個變數？",
+      "span": "make_tuple"
+    },
+    {
+      "id": "cs-argv",
+      "type": "fact",
+      "page": "lv.0_compressed.pdf#p16",
+      "question": "main 函數可以接哪些命令列參數？",
+      "span": "argc"
+    },
+    {
+      "id": "cs-undefined",
+      "type": "hierarchy",
+      "page": "lv.0_compressed.pdf#p17",
+      "question": "競賽程式常見的錯誤類型有哪些？",
+      "span": "未定義行為"
+    },
+    {
+      "id": "es-younger-dryas",
+      "type": "fact",
+      "page": "一下地科三段.pdf#p05",
+      "question": "冰芯記錄中突然變冷的事件叫什麼？",
+      "span": "新仙女木事件"
+    },
+    {
+      "id": "es-kyoto",
+      "type": "hierarchy",
+      "page": "一下地科三段.pdf#p06",
+      "question": "有哪些國際氣候協議？",
+      "span": "京都議定書"
+    },
+    {
+      "id": "es-treering",
+      "type": "hierarchy",
+      "page": "一下地科三段.pdf#p04",
+      "question": "研究古氣候可以用哪些指標？",
+      "span": "樹木生長輪"
+    },
+    {
+      "id": "es-precession",
+      "type": "fact",
+      "page": "一下地科三段.pdf#p03",
+      "question": "米蘭科維奇循環包含地軸的什麼運動？",
+      "span": "進動"
+    },
+    {
+      "id": "civ-appeal",
+      "type": "fact",
+      "page": "一下公民三段.pdf#p02",
+      "question": "提起行政訴訟前必須先經過什麼程序？",
+      "span": "訴願前置原則"
+    },
+    {
+      "id": "civ-legality",
+      "type": "hierarchy",
+      "page": "一下公民三段.pdf#p03",
+      "question": "刑法的基本原則是什麼？",
+      "span": "罪刑法定"
+    },
+    {
+      "id": "phys-lagrange",
+      "type": "fact",
+      "page": "哈佛高二下二段段複.pdf#p02",
+      "question": "James Webb 太空望遠鏡位於哪一個點？",
+      "span": "拉格朗日點"
+    },
+    {
+      "id": "phys-areal",
+      "type": "fact",
+      "page": "哈佛高二下二段段複.pdf#p01",
+      "question": "連線掃過的面積速率怎麼求？",
+      "span": "面積速率"
+    },
+    {
+      "id": "phys-atomic",
+      "type": "fact",
+      "page": "哈佛高二下二段段複.pdf#p03",
+      "question": "原子力與位置關係的那一題在問什麼？",
+      "span": "原子力"
+    }
   ]
 }

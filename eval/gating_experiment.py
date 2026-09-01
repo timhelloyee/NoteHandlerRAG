@@ -66,10 +66,14 @@ def usable_pages():
     index exactly the same pages.
     """
     keep = None
-    for structured in (False, True):
+    for cfg in CONFIGS.values():
+        f = CORPUS / (cfg.get("corpus") or
+                      ("corpus_b4.json" if cfg["structured"] else "corpus_b1.json"))
+        if not f.exists():
+            continue
         ids = {f"{n['file']}#p{pg['page']:02d}"
-               for n in load_corpus(structured) for pg in n["page_texts"]
-               if not pg["blank"]}
+               for n in json.loads(f.read_text(encoding="utf-8"))
+               for pg in n["page_texts"] if not pg["blank"]}
         keep = ids if keep is None else (keep & ids)
     return keep
 
@@ -144,7 +148,7 @@ def score_chunks(user, cases, top_k=10):
             "n": t, "rows": rows}
 
 
-def paired_bootstrap(rows_a, rows_b, iters=10000, seed=0):
+def paired_bootstrap(ranks_a, ranks_b, iters=10000, seed=0):
     """95% CI for the paired MRR difference (B4 - B1).
 
     Paired, because both configurations answer the same probes: the pairing removes
@@ -153,7 +157,7 @@ def paired_bootstrap(rows_a, rows_b, iters=10000, seed=0):
     which is a result, not a failure, and must be reported as such.
     """
     rr = lambda rank: (1.0 / rank) if rank else 0.0
-    diffs = [rr(b[2]) - rr(a[2]) for a, b in zip(rows_a, rows_b)]
+    diffs = [rr(b) - rr(a) for a, b in zip(ranks_a, ranks_b)]
     n = len(diffs)
     rng = random.Random(seed)
     means = []
@@ -207,20 +211,31 @@ def main():
         print(f"{name:6} {r['chunks']:7} | {r['recall@1']:9.2f} {r['mrr']:9.3f}"
               f" | {k['recall@1']:10.2f} {k['recall@3']:10.2f} {k['mrr']:10.3f}")
 
-    if len(results) == 2 and "B1" in results and "B4" in results:
-        b1, b4 = results["B1"][2], results["B4"][2]
-        point, lo, hi, wins, losses, n = paired_bootstrap(b1["rows"], b4["rows"])
-        spans_zero = lo <= 0 <= hi
-        print(chr(10) + f"chunk-level MRR delta (B4 - B1): {point:+.3f}  "
-              f"95% CI [{lo:+.3f}, {hi:+.3f}]  n={n}")
-        print(f"  {wins} improved, {losses} regressed, {n - wins - losses} unchanged")
-        print("  -> " + ("CI spans zero: no detectable difference between B1 and B4"
-                         if spans_zero else
-                         ("B4 significantly better" if lo > 0 else "B4 significantly worse")))
-        print("rank of first chunk containing the answer (None = not in top-10):")
-        for (cid, kind, r1), (_, _, r4) in zip(b1["rows"], b4["rows"]):
-            mark = "  " if r1 == r4 else ("+ " if (r4 or 99) < (r1 or 99) else "- ")
-            print(f"  {mark}{cid:18} {kind:10} B1={str(r1):>4}  B4={str(r4):>4}")
+    def ranks(rows, idx):
+        return [r[idx] for r in rows]
+
+    names = list(results)
+    for level, idx, key in (("page ", 1, 1), ("chunk", 2, 2)):
+        print(f"{chr(10)}--- {level}-level pairwise (paired bootstrap, 10k resamples) ---")
+        for a in names:
+            for b in names:
+                if names.index(b) <= names.index(a):
+                    continue
+                ra = ranks(results[a][key]["rows"], idx)
+                rb = ranks(results[b][key]["rows"], idx)
+                point, lo, hi, wins, losses, n = paired_bootstrap(ra, rb)
+                verdict = ("no detectable difference" if lo <= 0 <= hi else
+                           (f"{b} better" if lo > 0 else f"{a} better"))
+                print(f"  {b} - {a}: {point:+.3f}  95% CI [{lo:+.3f}, {hi:+.3f}]  "
+                      f"({wins}W/{losses}L/{n - wins - losses}T)  -> {verdict}")
+
+    print(f"{chr(10)}--- per-probe chunk rank (None = not in top-10) ---")
+    hdr = "  " + "probe".ljust(26) + "type".ljust(11) + "".join(x.rjust(6) for x in names)
+    print(hdr)
+    for k in range(len(results[names[0]][2]["rows"])):
+        row = results[names[0]][2]["rows"][k]
+        cells = "".join(str(results[nm][2]["rows"][k][2]).rjust(6) for nm in names)
+        print(f"  {row[0][:25]:26}{row[1]:11}{cells}")
 
     if not args.keep:
         for user, _, _ in results.values():
