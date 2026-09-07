@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "notehandler",
+      "runtimeExecutable": "C:\\Users\\user\\anaconda3\\envs\\ragtraining\\python.exe",
+      "runtimeArgs": ["dev_server.py", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

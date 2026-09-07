@@ -31,3 +31,9 @@ eval/b0/pages/
 eval/b0/pages v2/
 eval/b0/*_校正問題.md
 eval/RESULTS_gating.txt
+
+# local dev store (dev_server.py) — never the real vectorstores
+.devstore/
+
+# machine-local Claude Code permissions (launch.json is shared, this is not)
+.claude/settings.local.json
