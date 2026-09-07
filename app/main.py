@@ -15,9 +15,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -161,15 +161,40 @@ def note_text(file_id: str, user_id: str):
 
 
 @app.get("/api/notes/{file_id}/original")
-def note_original(file_id: str, user_id: str):
-    """The source image/PDF a note was extracted from, when it was kept."""
+def note_original(file_id: str, user_id: str, request: Request):
+    """The source image/PDF a note was extracted from, when it was kept.
+
+    Served inline, not as a download: the editor shows this next to the extracted text
+    so the user can check what the model actually read. FileResponse's default
+    `Content-Disposition: attachment` makes a browser download a PDF instead of
+    rendering it in the <iframe>, which would defeat the whole comparison.
+
+    Cached deliberately. Jumping to a PDF page reloads the <iframe> (the embedded viewer
+    only reads #page= on a fresh navigation), and FileResponse sets an ETag but does not
+    honour If-None-Match — so without this every page click re-sent the whole file, which
+    is 14 MB for lv.0_compressed.pdf. max-age serves repeat views from cache outright;
+    the 304 covers revalidation after it expires.
+    """
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
     path = rag_core.get_original(user_id, file_id)
     if not path:
         raise HTTPException(status_code=404,
                             detail=f"沒有保留 {file_id} 的原始檔（可能是在此功能上線前上傳的）")
-    return FileResponse(path, filename=file_id)
+    # stat_result must be passed for FileResponse to fill in etag/last-modified NOW;
+    # without it those headers are only computed while the response is being sent, so
+    # reading them here would give None — and comparing None to a missing If-None-Match
+    # would 304 every first request, serving an empty body for every image.
+    resp = FileResponse(path, filename=file_id, content_disposition_type="inline",
+                        stat_result=os.stat(path))
+    resp.headers["Cache-Control"] = "private, max-age=3600"
+    etag = resp.headers.get("etag")
+    inm = request.headers.get("if-none-match")
+    if etag and inm and etag in [t.strip() for t in inm.split(",")]:
+        return Response(status_code=304, headers={
+            k: v for k, v in resp.headers.items()
+            if k.lower() in ("etag", "cache-control", "last-modified")})
+    return resp
 
 
 @app.put("/api/notes/{file_id}")

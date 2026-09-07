@@ -119,9 +119,63 @@
     button.edit:hover { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 3px 10px rgba(79,70,229,.3); }
     #notes li { flex-wrap: wrap; }
     .note-actions { display: flex; gap: .4rem; flex: none; }
+    /* Editor: the original on the left, what the model read on the right. Seeing them
+       together is the only way a user finds out the transcription is wrong. */
     .editor { flex-basis: 100%; margin-top: .6rem; }
-    .editor textarea { min-height: 220px; font-size: .9rem; line-height: 1.5; }
+    .editor.split { display: grid; grid-template-columns: 1fr 1fr; gap: .9rem; align-items: start; }
+    .editor textarea { min-height: 420px; font-size: .9rem; line-height: 1.5; }
     .editor .hint { margin: .35rem 0 0; }
+    .editor .pane-label { font-size: .8rem; color: var(--muted); margin: 0 0 .3rem; }
+    .original { min-width: 0; }
+    .original img, .original iframe {
+      width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #fff;
+    }
+    .original img { display: block; height: auto; }
+    .original iframe { height: 420px; }
+    /* Two stacked frames: the incoming page loads at opacity 0 behind the visible one
+       and they swap when it is ready, so the pane never flashes blank mid-jump. */
+    .pdfwrap { position: relative; height: 420px; }
+    .pdfwrap iframe {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      opacity: 0; pointer-events: none;
+    }
+    .pdfwrap iframe.front { opacity: 1; pointer-events: auto; }
+    .pages { display: flex; flex-wrap: wrap; gap: .25rem; margin: .4rem 0 0; }
+    .pages button {
+      margin-top: 0; padding: .2rem .5rem; font-size: .75rem; flex: none;
+      background: #fff; color: var(--accent); border: 1px solid #c7d2fe; box-shadow: none;
+    }
+    .pages button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+    /* Live preview: the stored text is Markdown + LaTeX, which a student should not have
+       to read in order to fix a wrong digit. Showing the rendered result as they type
+       means the source box is only ever a means to an end. */
+    .preview-bar { display: flex; align-items: center; gap: .5rem; margin: .5rem 0 .3rem; }
+    .preview-bar .pane-label { margin: 0; }
+    .preview {
+      border: 1px solid var(--border); border-radius: 8px; padding: .6rem .8rem;
+      background: #fbfbfd; font-size: .9rem; line-height: 1.6; max-height: 300px;
+      overflow: auto; word-break: break-word;
+    }
+    .preview :first-child { margin-top: 0; }
+    .preview :last-child { margin-bottom: 0; }
+    .preview table { border-collapse: collapse; }
+    .preview th, .preview td { border: 1px solid var(--border); padding: .2rem .45rem; }
+    .toggle {
+      margin-top: 0; padding: .2rem .55rem; font-size: .75rem; flex: none;
+      background: #fff; color: var(--muted); border: 1px solid var(--border); box-shadow: none;
+    }
+    .toggle:hover { background: var(--border); color: var(--fg); box-shadow: none; }
+    /* Expanded full note text under a list row */
+    .full {
+      flex-basis: 100%; margin: .5rem 0 0; border: 1px solid var(--border);
+      border-radius: 8px; padding: .6rem .8rem; background: #fbfbfd;
+      font-size: .85rem; line-height: 1.6; max-height: 340px; overflow: auto;
+    }
+    .full :first-child { margin-top: 0; }
+    @media (max-width: 720px) {
+      .editor.split { grid-template-columns: 1fr; }
+      .editor textarea { min-height: 260px; }
+    }
   </style>
   <script>
     // MathJax must be configured before its script loads.
@@ -330,7 +384,39 @@
       }
     }
 
+    // Full note text, shared by 展開更多 and 儲存 .md so opening one does not make the
+    // other re-fetch. Cleared on every loadNotes(), which runs after an edit is saved,
+    // so a stale copy can never be handed out.
+    const noteTextCache = new Map();
+
+    async function fetchNoteText(id) {
+      if (noteTextCache.has(id)) return noteTextCache.get(id);
+      const res = await fetch(API_BASE + "/api/notes/" + encodeURIComponent(id)
+        + "?user_id=" + encodeURIComponent(userId()));
+      const data = await res.json();
+      if (!res.ok) throw new Error(errText(data, res));
+      noteTextCache.set(id, data.text);
+      return data.text;
+    }
+
+    // Save the stored note as a .md file. The text is already Markdown — the extraction
+    // prompts ask for it — so this is a straight download, no conversion. The note id
+    // keeps its own name but swaps the source extension: 一下公民三段.pdf -> .md.
+    function downloadMarkdown(id, text) {
+      const name = id.replace(/\.[^.\/\\]+$/, "") + ".md";
+      const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return name;
+    }
+
     async function loadNotes() {
+      noteTextCache.clear();
       if (!userId()) {
         $("notes").innerHTML = "<li class='muted'>請先使用 Google 登入</li>";
         return;
@@ -364,11 +450,64 @@
         const edit = document.createElement("button");
         edit.className = "edit";
         edit.textContent = "編輯";
-        edit.addEventListener("click", () => openEditor(li, n.id));
+        edit.addEventListener("click", () => openEditor(li, n.id, n.has_original, n.type));
+        // The list preview is capped at 240 chars server-side, so a 23-page PDF showed
+        // almost nothing of what was actually stored. This expands the whole thing in
+        // place, without making the user open the editor to read their own note.
+        const more = document.createElement("button");
+        more.className = "toggle";
+        more.textContent = "展開更多";
+        let fullBox = null;
+        more.addEventListener("click", async () => {
+          if (fullBox) {                       // already fetched — just toggle
+            const showing = !fullBox.hidden;
+            fullBox.hidden = showing;
+            more.textContent = showing ? "展開更多" : "顯示較少";
+            return;
+          }
+          more.disabled = true;
+          more.textContent = "載入中…";
+          try {
+            const text = await fetchNoteText(n.id);
+            fullBox = document.createElement("div");
+            fullBox.className = "full";
+            renderRich(fullBox, text);
+            li.appendChild(fullBox);
+            more.textContent = "顯示較少";
+          } catch (e) {
+            more.textContent = "展開更多";
+            alert("載入完整內容失敗：" + e.message);
+          } finally {
+            more.disabled = false;
+          }
+        });
+
+        // Save the note as a .md file the user can keep, open in any editor, or hand to
+        // another tool. The stored text is fetched rather than the 240-char preview.
+        const dl = document.createElement("button");
+        dl.className = "toggle";
+        dl.textContent = "儲存 .md";
+        dl.addEventListener("click", async () => {
+          const label = dl.textContent;
+          dl.disabled = true;
+          dl.textContent = "準備中…";
+          try {
+            downloadMarkdown(n.id, await fetchNoteText(n.id));
+            dl.textContent = "已儲存";
+            setTimeout(() => { dl.textContent = label; }, 1500);
+          } catch (e) {
+            dl.textContent = label;
+            alert("儲存失敗：" + e.message);
+          } finally {
+            dl.disabled = false;
+          }
+        });
         const del = document.createElement("button");
         del.className = "del";
         del.textContent = "刪除";
         del.addEventListener("click", () => deleteNote(n.id));
+        actions.appendChild(more);
+        actions.appendChild(dl);
         actions.appendChild(edit);
         actions.appendChild(del);
         li.appendChild(meta);
@@ -380,7 +519,114 @@
     // Editing the extracted text. Gemini's transcription of a handwritten note is a
     // guess; letting the user correct it once fixes every future answer, and costs no
     // API call — saving only re-chunks and re-embeds.
-    async function openEditor(li, id) {
+    // A PDF viewer built from TWO stacked iframes.
+    //
+    // The embedded viewer only honours #page= on a fresh navigation, so jumping pages
+    // means reloading — and reloading the single visible frame blanks it white while the
+    // file re-parses, which is exactly the flicker this replaces. So the new page is
+    // loaded in the hidden frame while the old one stays on screen, and they swap only
+    // once it has finished. The visible frame therefore never goes blank.
+    //
+    // Both frames request the same URL, which the endpoint marks cacheable, so the swap
+    // costs no extra download.
+    function framePdf(src, id) {
+      const wrap = document.createElement("div");
+      wrap.className = "pdfwrap";
+      let current = null;
+      let gen = 0;
+
+      // A FRESH iframe per jump, rather than re-pointing one.
+      //
+      // Reusing a frame was subtly broken in two ways, both of which showed as a blank
+      // pane. Clearing src first made the frame navigate to about:blank, and *that*
+      // fires `load` too — so a once-listener sometimes caught the blank navigation,
+      // promoted an empty frame to the front, and then had nothing left to fire when the
+      // PDF itself arrived. Skipping the clear was no better: going from #page=3 to
+      // #page=12 on a loaded frame is a same-document fragment change, so no load event
+      // ever came and the swap silently never happened.
+      //
+      // A brand new frame always performs a real navigation and fires exactly one load,
+      // for the document we asked for. The outgoing frame is removed only after the
+      // incoming one is on screen, so the pane is never empty.
+      function goto(n) {
+        const mine = ++gen;
+        const next = document.createElement("iframe");
+        next.title = id;
+        next.addEventListener("load", () => {
+          if (mine !== gen) { next.remove(); return; }   // a later click superseded this
+          // The plugin paints shortly after `load`; reveal on the next beat so the
+          // incoming frame is never shown mid-paint.
+          setTimeout(() => {
+            if (mine !== gen) { next.remove(); return; }
+            next.classList.add("front");
+            if (current && current !== next) current.remove();
+            current = next;
+          }, 250);
+        }, { once: true });
+        wrap.appendChild(next);
+        next.src = n ? src + "#page=" + n : src;
+      }
+      goto(null);                                   // initial view, page 1
+      return { wrap, goto };
+    }
+
+    // The original file, rendered next to the extracted text. Images go in an <img>,
+    // PDFs into the double-buffered viewer above.
+    // Returns a `goto(page)` for PDFs so the page buttons can drive it.
+    function originalPane(id, type) {
+      const pane = document.createElement("div");
+      pane.className = "original";
+      const label = document.createElement("p");
+      label.className = "pane-label";
+      label.textContent = "原始筆記";
+      pane.appendChild(label);
+      const src = API_BASE + "/api/notes/" + encodeURIComponent(id)
+        + "/original?user_id=" + encodeURIComponent(userId());
+      let goto = null;
+      if (type === "pdf") {
+        const v = framePdf(src, id);
+        pane.appendChild(v.wrap);
+        goto = v.goto;
+      } else {
+        const img = document.createElement("img");
+        img.src = src;
+        img.alt = id;
+        img.addEventListener("error", () => {
+          img.remove();
+          label.textContent = "原始檔載入失敗";
+        });
+        pane.appendChild(img);
+      }
+      return { pane, goto, src };
+    }
+
+    // PDF extractions carry "## 第 N 頁" section markers (describe_pdf writes them).
+    // Turning them into buttons lets the user step through a 23-page scan with the
+    // transcription and the page it came from staying in sync.
+    function pageJumper(text, goto, ta) {
+      const pages = [...text.matchAll(/^##\s*第\s*(\d+)\s*頁/gm)];
+      if (!goto || pages.length < 2) return null;
+      const bar = document.createElement("div");
+      bar.className = "pages";
+      for (const m of pages) {
+        const n = m[1];
+        const b = document.createElement("button");
+        b.textContent = n;
+        b.addEventListener("click", () => {
+          goto(Number(n));
+          ta.focus();
+          ta.setSelectionRange(m.index, m.index);
+          // Approximate scroll — textarea has no per-line geometry to query.
+          ta.scrollTop = ta.scrollHeight * (m.index / Math.max(text.length, 1));
+          bar.querySelectorAll("button").forEach(x => x.classList.remove("on"));
+          b.classList.add("on");
+        });
+        bar.appendChild(b);
+      }
+      return bar;
+    }
+
+    async function openEditor(li, id, hasOriginal, type) {
       if (li.querySelector(".editor")) return;   // already open
       const box = document.createElement("div");
       box.className = "editor";
@@ -402,6 +648,40 @@
       box.innerHTML = "";
       const ta = document.createElement("textarea");
       ta.value = text;
+      const right = document.createElement("div");
+      right.style.minWidth = "0";
+      const rightLabel = document.createElement("p");
+      rightLabel.className = "pane-label";
+      rightLabel.textContent = "模型讀到的內容（可修改）";
+
+      // Rendered preview of the box below it. The stored text is Markdown + LaTeX;
+      // a student fixing a misread digit should be able to check the result without
+      // reading `$\dfrac{...}$` — they compare this against the original on the left.
+      const pvBar = document.createElement("div");
+      pvBar.className = "preview-bar";
+      const pvLabel = document.createElement("p");
+      pvLabel.className = "pane-label";
+      pvLabel.textContent = "顯示結果";
+      const pvToggle = document.createElement("button");
+      pvToggle.className = "toggle";
+      pvToggle.textContent = "隱藏";
+      const pv = document.createElement("div");
+      pv.className = "preview";
+      let pvTimer = null;
+      const refreshPreview = () => renderRich(pv, ta.value);
+      pvToggle.addEventListener("click", () => {
+        const hidden = pv.hidden;
+        pv.hidden = !hidden;
+        pvToggle.textContent = hidden ? "隱藏" : "顯示";
+        if (hidden) refreshPreview();
+      });
+      // Debounced: MathJax typesetting on every keystroke would fight the typist.
+      ta.addEventListener("input", () => {
+        clearTimeout(pvTimer);
+        if (!pv.hidden) pvTimer = setTimeout(refreshPreview, 400);
+      });
+      pvBar.appendChild(pvLabel);
+      pvBar.appendChild(pvToggle);
       const save = document.createElement("button");
       save.textContent = "儲存";
       const cancel = document.createElement("button");
@@ -410,7 +690,9 @@
       cancel.style.marginLeft = ".5rem";
       const hint = document.createElement("p");
       hint.className = "muted hint";
-      hint.textContent = "修正辨識錯誤（例如公式或數字）後儲存，之後的回答就會使用更正後的內容。";
+      hint.textContent = hasOriginal
+        ? "左邊是你的原稿，中間的框是模型讀到的內容，下方「顯示結果」會即時呈現排版後的樣子——不需要看懂 $ 符號，直接對照原稿改字即可。改完儲存，之後的回答就會使用更正後的內容。"
+        : "在框中修正辨識錯誤，下方「顯示結果」會即時呈現排版後的樣子。改完儲存，之後的回答就會使用更正後的內容。";
       save.addEventListener("click", async () => {
         save.disabled = true;
         hint.textContent = "儲存中…";
@@ -430,10 +712,27 @@
         }
       });
       cancel.addEventListener("click", () => box.remove());
-      box.appendChild(ta);
-      box.appendChild(save);
-      box.appendChild(cancel);
-      box.appendChild(hint);
+      right.appendChild(rightLabel);
+      right.appendChild(ta);
+      right.appendChild(pvBar);
+      right.appendChild(pv);
+      refreshPreview();
+      right.appendChild(save);
+      right.appendChild(cancel);
+      right.appendChild(hint);
+      if (hasOriginal) {
+        box.classList.add("split");
+        const { pane, goto } = originalPane(id, type);
+        const bar = pageJumper(text, goto, ta);
+        if (bar) pane.appendChild(bar);
+        box.appendChild(pane);   // left
+      } else if (type === "text") {
+        const note = document.createElement("p");
+        note.className = "muted pane-label";
+        note.textContent = "純文字筆記沒有原始檔可對照。";
+        right.insertBefore(note, save);
+      }
+      box.appendChild(right);
     }
 
     async function deleteNote(id) {
