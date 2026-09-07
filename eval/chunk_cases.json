@@ -20,7 +20,15 @@
     "appears in B1's text only, 結構化綁定 in B1 and B4 only, both absent from B0. Those",
     "probes therefore scored extraction invention, not retrieval, and penalised whichever",
     "config was more faithful. Spans replaced with terms present in all three corpora and",
-    "unique to one page each."
+    "unique to one page each.",
+    "",
+    "2026-09-07 correction: six probes had their gold span written verbatim in their own",
+    "question (bio-triple 三重反應, bio-aril 假種皮, bio-hypogeal 子葉不出土型,",
+    "bio-stone-cell 石細胞, phys-areal 面積速率, phys-atomic 原子力). Those measured literal",
+    "string overlap rather than retrieval, and pushed every configuration toward the",
+    "ceiling together. Questions rewritten from the manuscript so the span no longer",
+    "appears in them; spans and gold pages unchanged, so n stays 29. bio-aril was also",
+    "retyped fact -> its rewritten form asks for a single fact, not a hierarchy relation."
   ],
   "cases": [
     {
@@ -48,7 +56,7 @@
       "id": "bio-triple",
       "type": "fact",
       "page": "一下生物三段_compressed.pdf#p14",
-      "question": "乙烯造成的三重反應是什麼？",
+      "question": "乙烯會讓植物的莖或根同時出現哪三種形態變化？",
       "span": "三重反應"
     },
     {
@@ -60,23 +68,23 @@
     },
     {
       "id": "bio-aril",
-      "type": "hierarchy",
+      "type": "fact",
       "page": "一下生物三段_compressed.pdf#p07",
-      "question": "什麼是假種皮？",
+      "question": "荔枝和龍眼種子外面那層可食用的構造是什麼時候長出來的？",
       "span": "假種皮"
     },
     {
       "id": "bio-hypogeal",
       "type": "hierarchy",
       "page": "一下生物三段_compressed.pdf#p04",
-      "question": "子葉不出土型的萌發過程是怎樣？",
+      "question": "蠶豆、豌豆、花生這類種子的萌發屬於哪一型？",
       "span": "子葉不出土型"
     },
     {
       "id": "bio-stone-cell",
       "type": "fact",
       "page": "一下生物三段_compressed.pdf#p06",
-      "question": "果皮中的石細胞出現在哪些水果？",
+      "question": "水蜜桃堅硬的內果皮是由什麼細胞構成的？",
       "span": "石細胞"
     },
     {
@@ -216,14 +224,14 @@
       "id": "phys-areal",
       "type": "fact",
       "page": "哈佛高二下二段段複.pdf#p01",
-      "question": "連線掃過的面積速率怎麼求？",
+      "question": "登月艇與母船繞月球運動時，它們與月球的連線在單位時間掃過的量要怎麼求？",
       "span": "面積速率"
     },
     {
       "id": "phys-atomic",
       "type": "fact",
       "page": "哈佛高二下二段段複.pdf#p03",
-      "question": "原子力與位置關係的那一題在問什麼？",
+      "question": "固定於原點的甲原子對乙原子施的作用力，只與什麼有關？",
       "span": "原子力"
     }
   ]

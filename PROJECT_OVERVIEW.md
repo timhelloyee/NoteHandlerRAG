@@ -54,7 +54,8 @@ Browser (app/static/index.html — also copied to docs/index.html for GitHub Pag
 FastAPI (app/main.py)  ── validates, routes, converts upstream failures to clean HTTP codes
    ▼
 RAG core (app/rag_core.py)
-   ├─ embeddings : intfloat/multilingual-e5-base  (SentenceTransformer, "passage:"/"query:" prefixes)
+   ├─ embeddings : EMBED_MODEL env, default intfloat/multilingual-e5-base (768d)
+   │                alternative Qwen/Qwen3-Embedding-0.6B (1024d, better separated — see below)
    ├─ vector DB  : ChromaDB, one collection per user, HNSW index, squared-L2 space
    ├─ vision+LLM : Google Gemini (selectable model, 2 API keys with fail-over)
    └─ persistence: private HF Dataset — restore on startup, push after every write
@@ -129,6 +130,101 @@ Measured on the real corpus:
 
 e5 similarities are range-compressed: unrelated Traditional Chinese still scores ~0.77
 cosine. So the two populations are close, and the separation is narrow (~0.02).
+
+**This table belongs to the encoder, not to the app.** `EMBED_MODEL` makes the embedder
+swappable, and every raw-distance constant below must be recalibrated when it changes —
+`eval/calibrate_gate.py` does the measurement. Under `Qwen/Qwen3-Embedding-0.6B` the same
+two populations sit at 0.41–1.13 (present) and 0.83–1.37 (absent): unrelated Chinese
+falls from ~0.79 to ~0.31 cosine, and the mean question-to-answer margin goes 0.101 →
+0.498. e5's 0.38 ceiling is *below Qwen3's smallest genuine answer distance*, so reusing
+it would refuse every question. Per-model values live in `rag_core._GATE_BY_MODEL`.
+
+Retrieval quality on the 29-probe set (see `eval/RESULTS_gating.txt`): swapping e5 →
+Qwen3-0.6B moves B1 chunk-level MRR 0.813 → 0.897 and R@1 0.69 → 0.83, paired diff
++0.083, 95% CI [-0.009, +0.175], 9W/2L. The largest effect this corpus has produced and
+the first CI that nearly excludes zero — but still not separated at n=29. Config ordering
+(B1 ≥ B4 > B0 at chunk level) is unchanged, so the fidelity-vs-retrievability finding is
+not an artefact of a weak encoder. Measurement runs must set `EMBED_DTYPE=float32`:
+Qwen3 at fp16 is not run-to-run reproducible on a 3050 (one probe swung rank 1 ↔ absent,
+worth 0.035 MRR; HNSW was ruled out — exact search agreed on 29/29).
+
+Switching the production default is a **data migration**, not a config change: the stored
+vectors are 768-wide and every note must be re-embedded. `get_user_collection` refuses a
+dimension mismatch with an explicit error rather than letting Chroma fail obscurely.
+
+### 2026-09-07: three defects that invalidated the earlier gate numbers
+
+Every gate result before this date is superseded. Details in `eval/RESULTS_gating.txt`.
+
+1. **`_chunk_text` emitted near-duplicate slivers.** One 1,132-char section produced 52
+   chunks of 414, 236, 48, 47, 46 ... 1 chars: the window snapped back to a boundary just
+   after `start`, the next window snapped to the same one, and `start` crawled forward a
+   character at a time. Fixed by only snapping to a boundary at least `size//2` in —
+   hard-cutting otherwise, which the docstring always claimed happened. It hit **B0
+   only** (300 → 252 chunks), so the bug inflated the human oracle alone.
+2. **Chunk length was confounded with chunking strategy.** B0's median chunk was 142
+   chars against B1's 421, so "B0 vs B1" was largely a length comparison.
+   `_merge_small_sections` (see `chunk_by_structure(merge_target=…)`) merges consecutive
+   sections into subtree blocks, giving length-matched arms `B4L` (318) and `B0L` (348).
+   **Every result table now carries chunk median/IQR/count** — without them no
+   comparison here is interpretable.
+3. **Six of 29 probes contained their own gold span in the question.** They measured
+   literal string overlap. Rewriting them **flipped the headline result**: chunk-level
+   B4 − B1 went −0.045 → **+0.027** under Qwen3, and B0 − B1 went −0.131 (raw p = 0.041)
+   → −0.075 (p = 0.279). Six bad probes were carrying the project's main finding.
+
+**Nothing survives Holm–Bonferroni at chunk level under either encoder.** The earlier
+claim that B0 − B1 was significant was uncorrected; the project's own statistics section
+requires the correction, and applying it removes the result.
+
+**The positive control fails.** `B0L-strip` deletes the ancestor path from every chunk
+with length, text and chunk count held constant — a deliberately large manipulation.
+Under e5 it *improves* retrieval (0.810 → 0.862); under Qwen3 it degrades it slightly
+(0.844 → 0.821); neither is significant and only 3 and 2 probes move. The two encoders
+disagree on the sign. This probe set cannot detect the mechanism M2 is built on, so
+expanding the corpus before rebuilding it would measure zero more precisely.
+
+`probes.md` is now generated from `chunk_cases.json` by `eval/sync_probes_md.py` — the
+two had already drifted (the 2026-08-31 contamination fix landed only in the JSON).
+
+### 2026-09-07: the structure line is secondary, and why
+
+The project's goal is that a student can **organise and query their own notes by subject,
+and understand what the model read**. Judged against that, the retrieval research was
+optimising something users never touch:
+
+- **Real users never reach the retrieval path.** `rag_query` calls `_whole_corpus` first;
+  under `WHOLE_CORPUS_CHARS` (default 60,000) the entire note set goes to Gemini and
+  `_retrieve` is skipped. The measured corpus is 52,875 chars. `eval/gating_experiment.py`
+  has to force `WHOLE_CORPUS_CHARS=0` or every configuration scores identically.
+- **`STRUCTURED_RULE`, `chunk_by_structure` and `merge_target` are production-dead.**
+  `add_image_note` / `add_pdf_note` never pass `structured=True`. B4/M2's mechanism has
+  never shipped.
+
+The code stays (`merge_target` defaults to 0), the results stay in
+`eval/RESULTS_gating.txt` for the write-up, and no further work goes into that line.
+Whole-corpus mode is now the *intended* architecture for a student-sized note collection,
+not an accident.
+
+### Known product gaps (recorded, not yet fixed)
+
+- **Subject is not a field.** It exists only as rule #1 in the extraction prompts and the
+  `_SUBJECT_TAG` regex — never written to Chroma metadata, never filtered on, never shown
+  as a label, and never applied to `.txt`/`.md` notes (they get no Gemini call at all).
+  "以科目別整理" is currently not implemented.
+- **Answers have no provenance.** `QueryResponse` is `{answer, model}`; chunk ids are
+  discarded in `_retrieve`; the context is an undelimited `"
+---
+".join(docs)`, so the
+  model could not cite a source even if asked to.
+- **Refusal is not a distinct state** — 「參考資料中沒有記載相關訊息」 renders exactly like
+  a short answer, and the API does not expose whether the relevance gate fired.
+- **Editing silently drops keyword anchors**: delete the trailing `關鍵字：` line and
+  `_keywords_of` finds nothing, disabling that note's keyword boost.
+- **`is_blank_page` relies on Gemini breaking its own rule** — it compares against
+  `無法辨識`, which is not one of the 11 permitted subject values.
+- `eval/run_eval.py`'s local store has no physics note, so 7 of its 28 cases cannot pass
+  under `--local`.
 
 **A bug that was fixed here — do not reintroduce it.** The original code had a single
 `MAX_DISTANCE = 0.35` applied as a **per-chunk filter**. Because genuine answers sit at

@@ -169,25 +169,58 @@ def _llm_invoke(prompt: str, model: str | None = None) -> str:
     raise ModelUnavailableError(model) from last_exc
 
 # --- embedding model (loaded once) -----------------------------------------
+# Swappable via EMBED_MODEL so the eval harness can compare encoders without a code
+# edit. Changing it changes the vector DIMENSION, so an existing collection embedded
+# with another model must be rebuilt — get_user_collection refuses to mix them.
 device = "cuda" if torch.cuda.is_available() else "cpu"
-EMBED_MODEL = "intfloat/multilingual-e5-base"
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "intfloat/multilingual-e5-base")
+
+# Prompt conventions are part of the model, not decoration: E5 was trained with
+# "passage: "/"query: " prefixes, Qwen3-Embedding with a bare document and an
+# instruction-prefixed query. Feeding a model the other family's format silently
+# costs retrieval quality, so key the prefixes off the model name.
+_QWEN_TASK = ("Given a question about a student's study notes, "
+              "retrieve the note passage that answers it")
+if "qwen3-embedding" in EMBED_MODEL.lower():
+    DOC_PREFIX, QUERY_PREFIX = "", f"Instruct: {_QWEN_TASK}{chr(10)}Query: "
+    # 0.6B in fp32 would not fit alongside Chroma on a 4 GB card; fp16 is what the
+    # model card recommends anyway. Qwen3 pools the LAST token, so padding must be
+    # on the left or short texts pool a pad token instead of their own content.
+    # fp16 halves VRAM and is what the model card uses, but at 1024 dims its rounding is
+    # enough to reorder near-ties, and which way it rounds depends on the cuBLAS kernel
+    # the driver picks — so identical runs can disagree on a borderline chunk. Set
+    # EMBED_DTYPE=float32 for measurement runs, where reproducibility outranks memory.
+    _dtype = getattr(torch, os.environ.get("EMBED_DTYPE", "float16"))
+    _LOAD_KW = {"model_kwargs": {"dtype": _dtype} if device == "cuda" else {},
+                "processor_kwargs": {"padding_side": "left"}}
+else:
+    DOC_PREFIX, QUERY_PREFIX = "passage: ", "query: "
+    _LOAD_KW = {}
+
 print(f"[rag_core] loading {EMBED_MODEL} on {device} ...")
-embedder = SentenceTransformer(EMBED_MODEL, device=device)
-print("[rag_core] embedder ready.")
+try:
+    embedder = SentenceTransformer(EMBED_MODEL, device=device, **_LOAD_KW)
+except TypeError:  # sentence-transformers < 5.4 spells it tokenizer_kwargs
+    _LOAD_KW["tokenizer_kwargs"] = _LOAD_KW.pop("processor_kwargs")
+    embedder = SentenceTransformer(EMBED_MODEL, device=device, **_LOAD_KW)
+EMBED_DIM = (embedder.get_embedding_dimension()  # renamed in sentence-transformers 5.x
+             if hasattr(embedder, "get_embedding_dimension")
+             else embedder.get_sentence_embedding_dimension())
+print(f"[rag_core] embedder ready ({EMBED_DIM} dims).")
 
 VECTORSTORE_ROOT = os.environ.get("VECTORSTORE_ROOT", "./vectorstores")
 
 
 # --- embeddings -------------------------------------------------------------
 def embed_text(texts: list[str]) -> list[list[float]]:
-    """Embed note passages. E5 expects a 'passage: ' prefix for documents."""
-    inputs = [f"passage: {t}" for t in texts]
+    """Embed note passages, with whatever document prefix the model was trained on."""
+    inputs = [DOC_PREFIX + t for t in texts]
     return embedder.encode(inputs, normalize_embeddings=True).tolist()
 
 
 def embed_query(text: str) -> list[float]:
-    """Embed a question. E5 expects a 'query: ' prefix for queries."""
-    return embedder.encode([f"query: {text}"], normalize_embeddings=True)[0].tolist()
+    """Embed a question, with whatever query prefix the model was trained on."""
+    return embedder.encode([QUERY_PREFIX + text], normalize_embeddings=True)[0].tolist()
 
 
 # --- per-user vector store --------------------------------------------------
@@ -202,10 +235,25 @@ def _safe_name(user_id: str) -> str:
     return name[:512]
 
 
+_dim_checked: set[str] = set()
+
+
 def get_user_collection(user_id: str):
     name = _safe_name(user_id)
     chroma_client = chromadb.PersistentClient(path=f"{VECTORSTORE_ROOT}/{name}")
-    return chroma_client.get_or_create_collection(name)
+    col = chroma_client.get_or_create_collection(name)
+    # A store embedded by another model has vectors of a different width. Chroma would
+    # accept the write and fail later with an opaque dimension error, so say it here,
+    # once per collection, in terms of the fix (re-upload the notes).
+    if name not in _dim_checked:
+        _dim_checked.add(name)
+        got = col.peek(1).get("embeddings")
+        if got is not None and len(got) and len(got[0]) != EMBED_DIM:
+            raise RuntimeError(
+                f"vectorstore '{name}' holds {len(got[0])}-dim vectors but {EMBED_MODEL} "
+                f"produces {EMBED_DIM}. Delete {VECTORSTORE_ROOT}/{name} and re-add the "
+                f"notes, or unset EMBED_MODEL.")
+    return col
 
 
 # --- persistence: sync vectorstores to a private HF Dataset --------------------------
@@ -352,7 +400,17 @@ def _chunk_text(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP
     while start < n:
         end = min(start + size, n)
         if end < n:
-            end = max((b for b in boundaries if start < b <= end), default=end)
+            cut = max((b for b in boundaries if start < b <= end), default=end)
+            # Only snap back to a boundary that leaves a substantial chunk. Snapping to
+            # one that sits just after `start` used to emit a sliver, and since the next
+            # window then snapped back to the SAME boundary, `start` crawled forward one
+            # character at a time: one 1,132-char section of 一下地科三段.pdf#p06 produced
+            # 52 chunks of 414, 236, 48, 47, 46, 45 ... 1 chars. The overlap guard below
+            # stopped it looping forever but not from filling the index with near
+            # duplicates. Past the halfway point, hard-cut instead — which is what the
+            # docstring always claimed happened for run-ons.
+            if cut - start >= size // 2:
+                end = cut
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
@@ -379,12 +437,56 @@ def _ancestor_prefix(path: list[str]) -> str:
     return (" › ".join(kept) + " ›\n") if kept else ""
 
 
+def _common_path(a: list[str], b: list[str]) -> list[str]:
+    i = 0
+    while i < len(a) and i < len(b) and a[i] == b[i]:
+        i += 1
+    return a[:i]
+
+
+def _merge_small_sections(sections: list[tuple[list[str], str]],
+                          target: int) -> list[tuple[list[str], str]]:
+    """Merge consecutive sections into subtree blocks of roughly `target` chars.
+
+    Structure chunking splits on every heading, so a page whose headings sit close
+    together yields many tiny chunks — measured on the 62-page eval corpus, B0's median
+    chunk is 111 chars against B1's 421, and 139 of its 300 chunks are under 100. Chunk
+    length is a confound: comparing a 111-char config with a 421-char one measures
+    length at least as much as it measures structure, and neither can be attributed.
+
+    Merging picks a COARSER LEVEL OF THE SAME TREE rather than abandoning structure.
+    Sections merge only in document order, the block is labelled with the deepest
+    ancestor path common to everything in it, and every merged section's own heading is
+    written into the body — so no text is lost, the heading simply moves from the prefix
+    into the content. Merging siblings alone is not enough: most adjacent sections are
+    parent-and-child, so a sibling-only rule plateaus at a median of 224 chars.
+    """
+    out: list[tuple[list[str], str]] = []
+    for path, body in sections:
+        block = f"{path[-1]}\n{body}" if path else body   # own heading joins the body
+        parent = path[:-1]
+        if out:
+            cur_path, cur_body = out[-1]
+            merged = _common_path(cur_path, parent)
+            room = max(target - len(_ancestor_prefix(merged)), 120)
+            if len(cur_body) + 1 + len(block) <= room:
+                out[-1] = (merged, cur_body + "\n" + block)
+                continue
+        out.append((parent, block))
+    return out
+
+
 def chunk_by_structure(text: str, size: int = CHUNK_CHARS,
-                       overlap: int = CHUNK_OVERLAP) -> list[str]:
+                       overlap: int = CHUNK_OVERLAP,
+                       merge_target: int = 0) -> list[str]:
     """Chunk on Markdown heading hierarchy, prefixing each chunk with its ancestor path.
 
     Falls back to the sliding window when the text carries no headings, so this is safe
     to run over prose extractions too.
+
+    `merge_target` > 0 first merges adjacent sibling sections up to that many chars
+    (see _merge_small_sections). It defaults to 0 — off — so existing stores and the
+    already-measured B4/B0 configurations keep byte-identical behaviour.
     """
     text = (text or "").strip()
     if not text:
@@ -412,6 +514,9 @@ def chunk_by_structure(text: str, size: int = CHUNK_CHARS,
 
     if not any(path for path, _ in sections):
         return _chunk_text(text, size, overlap)   # no headings — nothing to preserve
+
+    if merge_target:
+        sections = _merge_small_sections(sections, merge_target)
 
     chunks: list[str] = []
     for path, body in sections:
@@ -597,16 +702,23 @@ def _note_exists(collection, file_id: str) -> bool:
 
 
 def _add_note(user_id: str, file_id: str, text: str, kind: str, source: str,
-              structured: bool = False) -> bool:
+              structured: bool = False, merge_target: int = 0,
+              chunks: list[str] | None = None) -> bool:
     """Chunk, embed, and store one note (one vector per chunk).
 
     Returns True if added, False if it already existed. Pre-chunking data (one whole
     document under the bare id) coexists fine: _base_id/list/delete handle both shapes.
+
+    `chunks` lets a caller supply its own chunking and reuse the embed/store path — the
+    eval harness needs it to build control conditions (e.g. the same chunks with their
+    ancestor prefixes removed) without that logic living here.
     """
     collection = get_user_collection(user_id)
     if _note_exists(collection, file_id):
         return False
-    chunks = (chunk_by_structure if structured else _chunk_text)(text)
+    if chunks is None:
+        chunks = (chunk_by_structure(text, merge_target=merge_target) if structured
+                  else _chunk_text(text))
     if not chunks:
         return False
     keywords = _keywords_of(text)
@@ -720,6 +832,11 @@ def list_notes(user_id: str) -> list[dict]:
             doc = doc or ""
             truncated = len(doc) > 240 or entry["_chunks"] > 1
             entry["preview"] = doc[:240] + ("…" if truncated else "")
+    # has_original tells the editor whether to draw the side-by-side original pane.
+    # Reported here rather than letting the UI probe /original per note, which would
+    # cost a 404 round trip for every text note (they never have one) and log noise.
+    for base, entry in notes.items():
+        entry["has_original"] = get_original(user_id, base) is not None
     return [{k: v for k, v in e.items() if not k.startswith("_")} for e in notes.values()]
 
 
@@ -772,15 +889,35 @@ PROMPT_TEMPLATE = """你是一個專業的學習筆記問答助手。請「僅�
 # The previous single MAX_DISTANCE=0.35 conflated the two: as a per-chunk filter it sat
 # below almost every genuine answer, so nearly every query collapsed to the single-best
 # fallback and broad questions ("涵蓋哪些科目") saw exactly one note.
-RELEVANCE_CEILING = 0.38
-RELATIVE_MARGIN = 0.10
+#
+# Both numbers are raw distances, so both belong to the EMBEDDER, not to the app: e5
+# packs unrelated Traditional Chinese around 0.77 cosine, Qwen3 pushes it to ~0.31, and
+# the same 0.38 ceiling that admits every real answer under e5 rejects all of them under
+# Qwen3 (measured worst present distance 1.125). Calibrate a new model with
+# eval/calibrate_gate.py before adding it here; the env vars override for experiments.
+_GATE_BY_MODEL = {                     # model: (ceiling, margin)
+    "intfloat/multilingual-e5-base": (0.38, 0.10),
+    # ceiling 1.00 = best single split of present (max 1.125) vs absent (min 0.830);
+    # margin 0.30 keeps ~5 chunks, matching what 0.10 kept under e5's compressed scale.
+    "Qwen/Qwen3-Embedding-0.6B": (1.00, 0.30),
+}
+if EMBED_MODEL not in _GATE_BY_MODEL:
+    print(f"[rag_core] WARNING: no calibrated gate for {EMBED_MODEL}; using e5's values. "
+          f"Run eval/calibrate_gate.py and add it to _GATE_BY_MODEL.")
+_ceiling, _margin = _GATE_BY_MODEL.get(EMBED_MODEL, (0.38, 0.10))
+RELEVANCE_CEILING = float(os.environ.get("RELEVANCE_CEILING", _ceiling))
+RELATIVE_MARGIN = float(os.environ.get("RELATIVE_MARGIN", _margin))
 
 
 # Keyword-overlap boost: stored keywords that literally appear in the question lower
 # the effective distance. Substring matching works well for Chinese (no word spacing),
 # and exact term hits are precisely the signal cosine similarity dilutes. Kept small so
-# it reorders near-ties instead of overriding semantic ranking.
-KEYWORD_BONUS = 0.03
+# it reorders near-ties instead of overriding semantic ranking. Unlike the gate above it
+# is NOT scale-bound in practice: swept over the 29 chunk probes it is flat from 0.03 to
+# 0.15 on both encoders (e5 0.813 -> 0.819, Qwen3 0.897 -> 0.913 chunk MRR, then no
+# further change), so one constant serves both and the smallest one that gets the gain
+# wins.
+KEYWORD_BONUS = float(os.environ.get("KEYWORD_BONUS", 0.03))
 KEYWORD_BONUS_CAP = 3
 
 
