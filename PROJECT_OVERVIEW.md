@@ -206,6 +206,44 @@ The code stays (`merge_target` defaults to 0), the results stay in
 Whole-corpus mode is now the *intended* architecture for a student-sized note collection,
 not an accident.
 
+### 2026-09-14: sign-in is verified by the server, and sync failures are visible
+
+**Authentication.** The page used to decode the Google ID token in the browser and send
+only the email as `user_id`, which the API trusted — anyone who knew an address could list,
+read and delete that person's notes (demonstrated against the live Space). Now:
+
+- The page sends the ID token as `Authorization: Bearer`. `main.current_user` verifies it
+  with `google-auth` (`id_token.verify_oauth2_token`: Google signature, `aud` = this app's
+  client id, expiry, `email_verified`). No endpoint accepts `user_id` any more.
+- Verified tokens are cached until expiry, so certificates are not fetched per request.
+- Originals are fetched with the header and shown via `blob:` URLs — `<img>`/`<iframe>`
+  cannot send headers, and an email or token in their `src` would land in server logs
+  (the Space's access log previously showed `?user_id=timhelloyee%40gmail.com`).
+  `/original` now sends `Vary: Authorization` because its URL is identical across users.
+- CORS now allows `PUT`; editing a note from GitHub Pages had always failed its preflight.
+- ID tokens last ~1 hour. The page restores a stored token only while valid, uses
+  `auto_select` + One Tap to sign a returning user back in, and signs out visibly on 401.
+- **Local development:** `dev_server.py` accepts `X-Dev-User` instead of Google
+  (`localStorage.nh_dev_user` on localhost). `DEV_MODE` refuses to turn on when `SPACE_ID`
+  is set, so a stray `NOTEHANDLER_DEV` on the Space cannot enable impersonation.
+
+**Sync health** (`rag_core.sync_status()`, exposed at `/api/health`):
+`ok` / `disabled` (local, no token) / `unavailable` (restore failed, or no token on a Space —
+**all writes and queries refused**, since syncing an unloaded store would overwrite the
+Dataset) / `unsaved` (a later sync failed; writes allowed, the next sync repairs it). The
+page shows a banner for each and no longer says 「尚無筆記」 when the store never loaded.
+
+Also fixed: originals were saved *after* `_add_note` had already synced the folder, so they
+reached the Dataset only on the user's next change. They are now saved first
+(`_add_described_note`), and removed if storing the note fails.
+
+`tests/test_auth_and_sync.py` (18 checks, standalone) covers all of the above, including a
+forged token carrying a real address being rejected by the real Google verifier.
+
+**Deploying:** the backend and `docs/index.html` must ship together. A new backend rejects
+the old page's email-only requests (401), and a new page cannot talk to an old backend.
+Use the Space's own URL if GitHub Pages lags behind.
+
 ### Known product gaps (recorded, not yet fixed)
 
 - **Subject is not a field.** It exists only as rule #1 in the extraction prompts and the
@@ -217,6 +255,7 @@ not an accident.
 ---
 ".join(docs)`, so the
   model could not cite a source even if asked to.
+- ~~Auth on `user_id`~~ and ~~silent sync failure~~ — fixed 2026-09-14, see above.
 - **Refusal is not a distinct state** — 「參考資料中沒有記載相關訊息」 renders exactly like
   a short answer, and the API does not expose whether the relevance gate fired.
 - **Editing silently drops keyword anchors**: delete the trailing `關鍵字：` line and
