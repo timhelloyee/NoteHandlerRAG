@@ -6,19 +6,19 @@ store. This script calls the app's own functions in app/rag_core.py instead, so 
 added here is stored exactly as an upload through the web page would be: same prompts,
 same chunking, same categories.
 
-Like dev_server.py it never touches the private Hugging Face Dataset: HF_TOKEN is cleared
+Like scripts/dev_server.py it never touches the private Hugging Face Dataset: HF_TOKEN is cleared
 and the store defaults to .devstore/, the folder the local web page uses.
 
-    python notehandler_input.py add docs/a.txt images/Apple.jpg --user alice
-    python notehandler_input.py add pdf/lv.0_compressed.pdf --user alice --category 程式設計
-    python notehandler_input.py delete a.txt --user alice
+    python scripts/notehandler_input.py add samples/text/a.txt samples/images/Apple.jpg --user alice
+    python scripts/notehandler_input.py add pdf/lv.0_compressed.pdf --user alice --category 程式設計
+    python scripts/notehandler_input.py delete a.txt --user alice
 """
 import argparse
 import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent   # the project root; this file is in scripts/
 
 TEXT_EXTS = {".txt", ".md"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}

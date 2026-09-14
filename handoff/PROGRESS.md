@@ -56,8 +56,8 @@
 ### 2.4 部署與環境 ✅
 
 - Space 的 `HF_TOKEN` 失效問題已修好；筆電推送 token 已重建並存進 Git Credential Manager。
-- `dev_server.py` 從任何資料夾啟動都會切回專案資料夾並隔離雲端筆記庫。
-- 上層 `ClaudeProjects\.claude\launch.json` 的舊 `notehandler` 設定（會直接連到真實 Dataset）已改為使用 `dev_server.py`。
+- `scripts/dev_server.py` 從任何資料夾啟動都會切回專案資料夾並隔離雲端筆記庫。
+- 上層 `ClaudeProjects\.claude\launch.json` 的舊 `notehandler` 設定（會直接連到真實 Dataset）已改為使用 `scripts/dev_server.py`。
 
 ### 2.5 研究與文件 ✅
 
@@ -73,11 +73,11 @@
 
 | 原本 | 改成 | 用途 |
 |---|---|---|
-| `NoteHandler_Input.ipynb` | `notehandler_input.py` | 新增筆記（可指定類別）、刪除筆記 |
-| `NoteHandler_opus_Output.ipynb` | `notehandler_output.py` | 依類別列出筆記、問問題（可限定類別） |
+| `NoteHandler_Input.ipynb` | `scripts/notehandler_input.py` | 新增筆記（可指定類別）、刪除筆記 |
+| `NoteHandler_opus_Output.ipynb` | `scripts/notehandler_output.py` | 依類別列出筆記、問問題（可限定類別） |
 
 - 兩支腳本呼叫 `app/rag_core.py`，存法與網頁上傳相同；預設使用 `.devstore/`，不碰雲端筆記庫。已實測新增、跳過重複、找不到檔案、列出、分類問答、刪除。
-- `.gitignore` 改為忽略所有 `*.ipynb`；`README.md`、`PROJECT_OVERVIEW.md`、`embed_folder.py` 的引用已更新。
+- `.gitignore` 改為忽略所有 `*.ipynb`；`README.md`、`PROJECT_OVERVIEW.md`、`scripts/embed_folder.py` 的引用已更新。
 - 本機 `.ipynb_checkpoints\`（三份六月的自動備份，其中兩份含舊 Gemini 金鑰）已移到**資源回收筒**，確認不需要後再清空。
 
 ---

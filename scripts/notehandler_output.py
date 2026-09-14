@@ -4,20 +4,20 @@ The notebook opened the store directly and rebuilt its own retrieval and prompt,
 longer matched the app. This script calls app/rag_core.py, so an answer here is the answer
 the web page would give — including whole-corpus mode and asking inside one category.
 
-Like dev_server.py it never touches the private Hugging Face Dataset: HF_TOKEN is cleared
+Like scripts/dev_server.py it never touches the private Hugging Face Dataset: HF_TOKEN is cleared
 and the store defaults to .devstore/, the folder the local web page uses.
 
-    python notehandler_output.py list --user alice
-    python notehandler_output.py ask "粒線體的功能是什麼？" --user alice
-    python notehandler_output.py ask "When did the French Revolution begin?" --user alice --category B
-    python notehandler_output.py ask --user alice          # prompts for the question
+    python scripts/notehandler_output.py list --user alice
+    python scripts/notehandler_output.py ask "粒線體的功能是什麼？" --user alice
+    python scripts/notehandler_output.py ask "When did the French Revolution begin?" --user alice --category B
+    python scripts/notehandler_output.py ask --user alice          # prompts for the question
 """
 import argparse
 import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent   # the project root; this file is in scripts/
 
 
 def parse_args():

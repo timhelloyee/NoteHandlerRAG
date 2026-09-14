@@ -1,4 +1,4 @@
-"""Embed every file in docs/ and images/ into a user's ChromaDB vectorstore.
+"""Embed every file in samples/text/ and samples/images/ into a user's ChromaDB vectorstore.
 
 ⚠️ Local CLI only — NOT used by the deployed app (app/rag_core.py). This script CHUNKS
 text (ids like "a.txt#0"), while the app stores one whole document per file (id "a.txt").
@@ -9,16 +9,19 @@ Don't point both at the same store: the mixed id schemes would duplicate content
 
 Retrieval embedder is intfloat/multilingual-e5-base (繁中+英文皆強，跨語言檢索佳)，
 取代原本對中文較弱的 CLIP 文字編碼器。E5 需要前綴：文件用 "passage: "，查詢用
-"query: "（查詢端請用 notehandler_output.py）。
+"query: "（查詢端請用 scripts/notehandler_output.py）。
 
 Usage:
-    python embed_folder.py alice
+    python scripts/embed_folder.py alice
 """
 import os
 import re
 import sys
 import glob
 import time
+
+# Paths below (samples/, vectorstores/, .env) are relative to the project root.
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import chromadb
@@ -165,12 +168,12 @@ def main():
     user_id = sys.argv[1] if len(sys.argv) > 1 else "alice"
     collection = get_user_collection(user_id)
 
-    txt_files = sorted(glob.glob("docs/*.txt"))
+    txt_files = sorted(glob.glob("samples/text/*.txt"))
     img_files = sorted(
-        p for ext in ("jpg", "jpeg", "png") for p in glob.glob(f"images/*.{ext}")
+        p for ext in ("jpg", "jpeg", "png") for p in glob.glob(f"samples/images/*.{ext}")
     )
 
-    print(f"\n== docs ({len(txt_files)}) ==")
+    print(f"\n== text ({len(txt_files)}) ==")
     for p in txt_files:
         add_txt(collection, p)
 

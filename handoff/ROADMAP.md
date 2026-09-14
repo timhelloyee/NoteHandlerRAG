@@ -41,7 +41,7 @@
 | 部署時 GitHub（`origin`）和 HF Space（`hf`）都要推 | 兩個是獨立的 remote |
 | **後端和前端必須一起部署** | 新後端會拒絕舊前端的請求，新前端也無法搭配舊後端 |
 | HF 推送由使用者在**自己的終端機、NoteHandler 資料夾內**執行 `git push hf main:main` | 背景執行無法跳出 Git Credential Manager 登入視窗；使用者家目錄本身也是 git repo，在錯的資料夾會找不到 `main` |
-| 本機開發只用 `dev_server.py`（`.claude/launch.json` 已指向它），**不要**直接跑 `uvicorn app.main:app` | `.env` 含 `HF_TOKEN`，直接跑會還原並寫回真實的私有 Dataset。9/14 曾因上層資料夾的舊啟動設定發生一次（只有讀取），已修正 |
+| 本機開發只用 `scripts/dev_server.py`（`.claude/launch.json` 已指向它），**不要**直接跑 `uvicorn app.main:app` | `.env` 含 `HF_TOKEN`，直接跑會還原並寫回真實的私有 Dataset。9/14 曾因上層資料夾的舊啟動設定發生一次（只有讀取），已修正 |
 | 本機伺服器啟動後先看 `/api/health`：必須是 `disabled` | `ok` 代表連到了真實 Dataset，立刻停掉 |
 | 不要放寬 `unavailable` 狀態下的寫入封鎖 | 同步現在會讓 Dataset 鏡像本機資料夾，筆記庫沒載入時寫入會刪掉雲端上的真實筆記 |
 | 兩個 HF token 分開：Space secret 要能寫 **Dataset**；筆電 push token 只給 **Space** | 筆電 token 外洩時，不應連帶讓人能改寫筆記 |
@@ -104,7 +104,7 @@
 | 完整內容、匯出 | 「展開更多／顯示較少」、「儲存 .md」 | 清單列 |
 | 原稿快取 | `ETag`／`If-None-Match` 回 304 | `note_original` |
 | 研究線降級、harness 修正 | 見第 6 節 | `eval/` |
-| 本機隔離開發伺服器 | `dev_server.py`：清空 `HF_TOKEN`、改用 `.devstore/`，並切換到自己的資料夾 | `dev_server.py` |
+| 本機隔離開發伺服器 | `scripts/dev_server.py`：清空 `HF_TOKEN`、改用 `.devstore/`，並切換到自己的資料夾 | `scripts/dev_server.py` |
 
 ---
 
@@ -184,7 +184,7 @@
 ### 5.4 驗證
 
 - `tests/test_categories.py`：**12/12**。其中一項以假的 Gemini 記錄送進模型的提示詞，確認選 A 時只出現 A 的內容、且只打開 A 的資料夾（整份模式與強制檢索都測）。
-- 本機實測（隔離的 `dev_server.py`）：建立 A、B、C，各放一個英文句子的 txt；真實滑鼠把筆記從 A 拖到 B 再拖回；問「When did the French Revolution begin?」：範圍 A 回「參考資料中沒有記載相關訊息」、範圍 B 回 1789、全部類別列出三句。
+- 本機實測（隔離的 `scripts/dev_server.py`）：建立 A、B、C，各放一個英文句子的 txt；真實滑鼠把筆記從 A 拖到 B 再拖回；問「When did the French Revolution begin?」：範圍 A 回「參考資料中沒有記載相關訊息」、範圍 B 回 1789、全部類別列出三句。
 - **尚未在線上驗證：** Dataset 鏡像刪除。建議在線上建一個測試類別、刪除，重啟 Space 後確認沒有回來（見第 10 節）。
 
 ---
@@ -336,6 +336,6 @@
 | `eval/RESULTS_gating.txt` | 研究線所有實驗的完整數據 |
 | `tests/test_auth_and_sync.py` | 身分驗證與同步安全的 18 項檢查 |
 | `tests/test_categories.py` | 分類系統的 12 項檢查 |
-| `dev_server.py` | 隔離的本機開發伺服器（不碰私有 Dataset） |
+| `scripts/dev_server.py` | 隔離的本機開發伺服器（不碰私有 Dataset） |
 | `app/static/ui_editor.html` | 本機樣式編輯器 |
-| `.claude/launch.json` | Browser pane 啟動設定（使用 `dev_server.py`） |
+| `.claude/launch.json` | Browser pane 啟動設定（使用 `scripts/dev_server.py`） |

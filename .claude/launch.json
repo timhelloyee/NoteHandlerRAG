@@ -4,7 +4,7 @@
     {
       "name": "notehandler",
       "runtimeExecutable": "C:\\Users\\user\\anaconda3\\envs\\ragtraining\\python.exe",
-      "runtimeArgs": ["dev_server.py", "--port", "8000"],
+      "runtimeArgs": ["scripts/dev_server.py", "--port", "8000"],
       "port": 8000
     }
   ]

@@ -223,7 +223,7 @@ read and delete that person's notes (demonstrated against the live Space). Now:
 - CORS now allows `PUT`; editing a note from GitHub Pages had always failed its preflight.
 - ID tokens last ~1 hour. The page restores a stored token only while valid, uses
   `auto_select` + One Tap to sign a returning user back in, and signs out visibly on 401.
-- **Local development:** `dev_server.py` accepts `X-Dev-User` instead of Google
+- **Local development:** `scripts/dev_server.py` accepts `X-Dev-User` instead of Google
   (`localStorage.nh_dev_user` on localhost). `DEV_MODE` refuses to turn on when `SPACE_ID`
   is set, so a stray `NOTEHANDLER_DEV` on the Space cannot enable impersonation.
 
@@ -468,10 +468,10 @@ to be `2-2cos`; the filter bug was found by noticing `top_k` had no effect. Keep
 6. **Persistence is coarse** — the whole user folder is re-uploaded after each write, and
    concurrent uploads could race. Fine for one user, not for many.
 7. **Free-tier scaling** — CPU-only, and every write is a Dataset round trip.
-8. **`embed_folder.py` is a local CLI, not used by the app**, and chunks with a *different*
+8. **`scripts/embed_folder.py` is a local CLI, not used by the app**, and chunks with a *different*
    id scheme (`a.txt#0` at 140 chars). Pointing it at the app's store would duplicate
    content. The old notebooks were removed on 2026-09-14 and replaced by
-   `notehandler_input.py` / `notehandler_output.py`, which call `app/rag_core.py` and use
+   `scripts/notehandler_input.py` / `scripts/notehandler_output.py`, which call `app/rag_core.py` and use
    the isolated `.devstore/` (the repo now ignores `*.ipynb`).
 
 ---

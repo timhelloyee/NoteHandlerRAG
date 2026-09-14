@@ -6,12 +6,13 @@ That is fine in production and wrong on a laptop: test uploads would land in the
 store. This entry point clears HF_TOKEN and points the store at a scratch directory
 before importing the app, so nothing here touches the private Dataset.
 
-    python dev_server.py [--port 8000] [--store .devstore]
+    python scripts/dev_server.py [--port 8000] [--store .devstore]
 
 For the deployed Space, keep using `uvicorn app.main:app` (see Dockerfile).
 """
 import argparse
 import os
+import sys
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=8000)
@@ -19,9 +20,11 @@ ap.add_argument("--store", default=".devstore")
 args = ap.parse_args()
 
 # Run from the project folder whatever the caller's working directory is, so the scratch
-# store and the app import resolve here — a launcher in a parent folder once started the
+# store and the app import resolve there — a launcher in a parent folder once started the
 # app with plain uvicorn instead, which restored the real Dataset.
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(ROOT)
+sys.path.insert(0, ROOT)                       # `app` lives in the project root, not scripts/
 
 os.environ["HF_TOKEN"] = ""                  # no Dataset restore, no Dataset push
 os.environ["VECTORSTORE_ROOT"] = args.store    # never the real ./vectorstores

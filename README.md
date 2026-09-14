@@ -60,28 +60,50 @@ Copy `.env.example` to `.env` for local runs; on the Space set these as **secret
 
 ```bash
 pip install -r requirements.txt
-uvicorn app.main:app --port 8000   # open http://localhost:8000
+python scripts/dev_server.py --port 8000   # open http://localhost:8000
 ```
+
+`scripts/dev_server.py` ignores `HF_TOKEN` and keeps notes in `.devstore/`, so a local run
+never reads or overwrites the private Dataset. (Plain `uvicorn app.main:app` is what the
+Space runs; on a laptop with `.env` it would sync with the real notes.) Locally you can
+skip Google sign-in: set `localStorage.nh_dev_user` in the browser to any name.
 
 Google sign-in requires the page origin to be listed under the OAuth client's
 **Authorized JavaScript origins** (e.g. `http://localhost:8000`), and does not work
 inside the Hugging Face Space iframe — open the Space in its own tab.
 
+## Repo layout
+
+```
+app/          the web app: FastAPI backend (main.py, rag_core.py) and static/ pages
+docs/         GitHub Pages copy of the frontend (index.html only)
+scripts/      command-line tools: dev_server.py, notehandler_input.py,
+              notehandler_output.py, embed_folder.py
+tests/        standalone test scripts (python tests/test_*.py)
+eval/         research harness for the retrieval experiments, with its data and reviews
+handoff/      project documents: PROJECT_OVERVIEW.md, ROADMAP.md, PROGRESS.md
+samples/      small example notes (text/ and images/) for trying the scripts
+```
+
+Files that stay in the root do so because something requires it there: `README.md`
+(its front matter configures the Hugging Face Space), `Dockerfile`, `requirements.txt`,
+`LICENSE`, `.env.example`, `.gitignore`, `.gitattributes`.
+
 ## Repo layout notes
 
 - `docs/index.html` is a copy of `app/static/index.html` for GitHub Pages — keep them in
   sync when editing the frontend.
-- [notehandler_input.py](notehandler_input.py) (add / delete notes) and
-  [notehandler_output.py](notehandler_output.py) (list notes / ask a question) are the
+- [scripts/notehandler_input.py](scripts/notehandler_input.py) (add / delete notes) and
+  [scripts/notehandler_output.py](scripts/notehandler_output.py) (list notes / ask a question) are the
   command-line versions of the app. They call `app/rag_core.py`, so notes are stored
-  exactly as a web upload would store them, and like `dev_server.py` they use `.devstore/`
+  exactly as a web upload would store them, and like `scripts/dev_server.py` they use `.devstore/`
   and never touch the private Dataset:
 
   ```bash
-  python notehandler_input.py add docs/a.txt --user alice --category 生物
-  python notehandler_output.py ask "粒線體的功能是什麼？" --user alice
+  python scripts/notehandler_input.py add samples/text/a.txt --user alice --category 生物
+  python scripts/notehandler_output.py ask "粒線體的功能是什麼？" --user alice
   ```
-- [embed_folder.py](embed_folder.py) is an older local experiment; it chunks text with a
+- [scripts/embed_folder.py](scripts/embed_folder.py) is an older local experiment; it chunks text with a
   different id scheme (`a.txt#0`) that is **incompatible** with the app's store — don't
   point it at a store the app uses.
 - `vectorstores/` and `.env` are git-ignored by design (privacy / secrets).

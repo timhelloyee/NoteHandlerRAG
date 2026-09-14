@@ -3,8 +3,8 @@
 .env.*
 !.env.example
 
-# No notebooks: the project uses plain Python scripts (notehandler_input.py /
-# notehandler_output.py). Notebooks also save their outputs, which here meant note text.
+# No notebooks: the project uses plain Python scripts (scripts/notehandler_input.py /
+# scripts/notehandler_output.py). Notebooks also save their outputs, which here meant note text.
 *.ipynb
 
 # Vector stores — data lives only in the private HF Dataset, never committed here
@@ -33,7 +33,7 @@ eval/b0/pages v2/
 eval/b0/*_校正問題.md
 eval/RESULTS_gating.txt
 
-# local dev store (dev_server.py) — never the real vectorstores
+# local dev store (scripts/dev_server.py) — never the real vectorstores
 .devstore/
 
 # machine-local Claude Code permissions (launch.json is shared, this is not)
