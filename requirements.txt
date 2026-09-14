@@ -13,3 +13,6 @@ pypdf>=4
 fastapi>=0.115,<1
 uvicorn[standard]
 python-multipart
+# Verifies Google ID tokens server-side (app/main.py current_user).
+google-auth>=2.20
+requests

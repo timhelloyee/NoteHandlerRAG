@@ -20,8 +20,9 @@ args = ap.parse_args()
 
 os.environ["HF_TOKEN"] = ""                    # no Dataset restore, no Dataset push
 os.environ["VECTORSTORE_ROOT"] = args.store    # never the real ./vectorstores
+os.environ["NOTEHANDLER_DEV"] = "1"            # mounts /ui-editor, which writes to disk
 
 import uvicorn  # noqa: E402  (after the env is set)
 
-print(f"[dev] store={args.store}  HF sync disabled")
+print(f"[dev] store={args.store}  HF sync disabled  UI editor at /ui-editor")
 uvicorn.run("app.main:app", host="127.0.0.1", port=args.port, reload=False)

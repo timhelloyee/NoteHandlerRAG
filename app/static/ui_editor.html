@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NoteHandler UI 編輯器</title>
+<style>
+  :root { font-family: system-ui, "Segoe UI", "Noto Sans TC", sans-serif; font-size: 15px; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: grid; grid-template-columns: 340px 1fr;
+         background: #f6f8fc; color: #1f2430; }
+  #panel { overflow: auto; padding: 1rem 1.1rem 3rem; background: #fff;
+           border-right: 1px solid #e6e8ef; }
+  h1 { font-size: 1.05rem; margin: 0 0 .2rem; }
+  .sub { color: #6b7280; font-size: .8rem; margin: 0 0 1rem; line-height: 1.5; }
+  fieldset { border: 1px solid #e6e8ef; border-radius: 10px; padding: .7rem .8rem 1rem;
+             margin: 0 0 .9rem; }
+  legend { font-size: .78rem; color: #6b7280; padding: 0 .3rem; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: .5rem; align-items: center;
+         margin-bottom: .55rem; }
+  .row label { font-size: .82rem; }
+  .row .name { color: #9aa1ad; font-size: .7rem; display: block; }
+  input[type=color] { width: 46px; height: 30px; padding: 0; border: 1px solid #e6e8ef;
+                      border-radius: 6px; background: #fff; cursor: pointer; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: .35rem .5rem; border: 1px solid #e6e8ef; border-radius: 7px;
+    font: inherit; font-size: .82rem; background: #fbfcfe; }
+  select { cursor: pointer; }
+  /* Font rows put the "where it applies" label on its own line — the arrow text is
+     long enough that a two-column row would squash the dropdown. */
+  #fonts .row { grid-template-columns: 1fr; gap: .25rem; margin-bottom: .8rem; }
+  #fonts .row label { white-space: pre; font-size: .8rem; }
+  .slider { display: grid; grid-template-columns: 1fr 62px; gap: .4rem; align-items: center; }
+  input[type=range] { width: 100%; }
+  .wide { grid-column: 1 / -1; }
+  .actions { position: sticky; bottom: 0; background: #fff; padding: .8rem 0 0;
+             border-top: 1px solid #e6e8ef; display: flex; flex-wrap: wrap; gap: .4rem; }
+  button { font: inherit; font-size: .82rem; padding: .45rem .8rem; border-radius: 8px;
+           border: 1px solid #e6e8ef; background: #fff; cursor: pointer; }
+  button.primary { background: #4f46e5; color: #fff; border-color: #4f46e5; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { font-size: .78rem; margin: .55rem 0 0; min-height: 1.2em; }
+  #status.err { color: #dc2626; }
+  #status.ok { color: #059669; }
+  #preview { border: 0; width: 100%; height: 100vh; background: #fff; }
+</style>
+</head>
+<body>
+  <div id="panel">
+    <h1>UI 編輯器</h1>
+    <p class="sub">改的是 <code>index.html</code> 的 <code>:root</code> 設計變數。
+      右邊即時預覽，按「儲存」才會寫入檔案（同時同步 <code>docs/index.html</code>）。
+      只在本機 <code>dev_server.py</code> 下可用。</p>
+
+    <fieldset><legend>顏色</legend><div id="colors"></div></fieldset>
+    <fieldset><legend>版面與字級</legend><div id="layout"></div></fieldset>
+    <fieldset><legend>字型（依套用位置分開設定）</legend><div id="fonts"></div></fieldset>
+    <fieldset><legend>進階</legend><div id="advanced"></div></fieldset>
+
+    <div class="actions">
+      <button class="primary" id="save">儲存到檔案</button>
+      <button id="reset">回到已儲存</button>
+      <button id="revert">還原上一次備份</button>
+    </div>
+    <p id="status"></p>
+  </div>
+  <iframe id="preview" src="/"></iframe>
+
+<script>
+// Curated font stacks. Free text was replaced by a picker because a raw CSS stack is
+// both hard to read and easy to break — every option here has a CJK face and a generic
+// fallback, so no choice can leave Chinese text without a font.
+const FONT_CHOICES = [
+  { label: "系統預設（最保險）", v: 'system-ui, "Segoe UI", "Noto Sans TC", sans-serif' },
+  { label: "黑體 · 微軟正黑",   v: '"Microsoft JhengHei", "Noto Sans TC", sans-serif' },
+  { label: "黑體 · 思源黑體",   v: '"Noto Sans TC", "Microsoft JhengHei", sans-serif' },
+  { label: "明體 · 襯線",       v: '"Noto Serif TC", "PMingLiU", serif' },
+  { label: "楷體",             v: '"DFKai-SB", "Kaiti TC", serif' },
+  // Must match index.html's --font-mono default exactly, or the code slot opens showing
+  // "自訂：…" instead of cleanly selecting this option.
+  { label: "等寬（程式碼風）",   v: 'ui-monospace, "Cascadia Code", Consolas, "Noto Sans Mono", monospace' },
+];
+
+// Token metadata. `kind` picks the control; `en` is the plain-English caption shown
+// under each label — the raw "--font-family" form was leaking CSS syntax into the UI.
+// The variables themselves keep their names: a CSS custom property must start with --.
+const FIELDS = [
+  { k: "--accent",      t: "主色（按鈕、連結）",   en: "accent",            kind: "color",  group: "colors" },
+  { k: "--accent-2",    t: "次要主色（漸層、聚焦）", en: "accent 2",          kind: "color",  group: "colors" },
+  { k: "--ink",         t: "主要文字",           en: "text",              kind: "color",  group: "colors" },
+  { k: "--muted",       t: "次要文字",           en: "muted text",        kind: "color",  group: "colors" },
+  { k: "--border",      t: "邊框",              en: "border",            kind: "color",  group: "colors" },
+  { k: "--card",        t: "卡片底色",           en: "card background",   kind: "color",  group: "colors" },
+  { k: "--bg-top",      t: "背景漸層上緣",        en: "background top",    kind: "color",  group: "colors" },
+  { k: "--bg-body",     t: "背景主色",           en: "background",        kind: "color",  group: "colors" },
+  { k: "--danger",      t: "刪除／錯誤",         en: "danger",            kind: "color",  group: "colors" },
+  { k: "--page-width",  t: "版面寬度",  en: "page width",  kind: "px", min: 520, max: 1400, group: "layout" },
+  { k: "--radius",      t: "圓角",     en: "corner radius", kind: "px", min: 0,   max: 32,  group: "layout" },
+  { k: "--font-size",   t: "基準字級",  en: "font size",   kind: "px", min: 12,  max: 22,   group: "layout" },
+  { k: "--line-height", t: "行高",     en: "line height", kind: "num", min: 1.2, max: 2.2, step: 0.05, group: "layout" },
+  // Three font slots, each labelled with where it actually applies.
+  { k: "--font-family",  t: "介面文字　→ 全站內文、按鈕、清單", en: "body font",    kind: "font", group: "fonts" },
+  { k: "--font-heading", t: "標題　　　→ 頁首大標題 NoteHandlerRAG", en: "heading font", kind: "font", group: "fonts" },
+  { k: "--font-mono",    t: "程式碼　　→ 答案與筆記中的程式碼區塊", en: "code font",    kind: "font", group: "fonts" },
+  { k: "--shadow",      t: "陰影",     en: "shadow",      kind: "text",  group: "advanced" },
+];
+
+let saved = {};      // what is currently on disk
+let live = {};       // what the panel is showing
+const $ = id => document.getElementById(id);
+const setStatus = (msg, cls = "") => { const s = $("status"); s.textContent = msg; s.className = cls; };
+
+// The preview is same-origin, so the tokens can be pushed straight onto its <html>
+// element — no reload, no flicker, and the real app is what you are looking at.
+function applyPreview() {
+  const doc = $("preview").contentDocument;
+  if (!doc || !doc.documentElement) return;
+  for (const [k, v] of Object.entries(live)) doc.documentElement.style.setProperty(k, v);
+}
+
+function build() {
+  for (const g of ["colors", "layout", "fonts", "advanced"]) $(g).innerHTML = "";
+  for (const f of FIELDS) {
+    if (!(f.k in live)) continue;
+    const row = document.createElement("div");
+    row.className = "row";
+    const lab = document.createElement("label");
+    lab.textContent = f.t;
+    const en = document.createElement("span");
+    en.className = "name";
+    en.textContent = f.en;
+    lab.appendChild(en);
+    row.appendChild(lab);
+
+    if (f.kind === "color") {
+      const c = document.createElement("input");
+      c.type = "color";
+      c.value = toHex(live[f.k]);
+      c.addEventListener("input", () => { live[f.k] = c.value; applyPreview(); });
+      row.appendChild(c);
+    } else if (f.kind === "px" || f.kind === "num") {
+      const wrap = document.createElement("div");
+      wrap.className = "slider wide";
+      const r = document.createElement("input");
+      r.type = "range"; r.min = f.min; r.max = f.max; r.step = f.step || 1;
+      r.value = parseFloat(live[f.k]) || f.min;
+      const n = document.createElement("input");
+      n.type = "number"; n.min = f.min; n.max = f.max; n.step = f.step || 1;
+      n.value = r.value;
+      const push = v => {
+        live[f.k] = f.kind === "px" ? v + "px" : String(v);
+        r.value = v; n.value = v; applyPreview();
+      };
+      r.addEventListener("input", () => push(r.value));
+      n.addEventListener("input", () => push(n.value));
+      wrap.append(r, n);
+      row.appendChild(wrap);
+    } else if (f.kind === "font") {
+      const sel = document.createElement("select");
+      sel.className = "wide";
+      const current = (live[f.k] || "").trim();
+      let matched = false;
+      for (const c of FONT_CHOICES) {
+        const o = document.createElement("option");
+        o.value = c.v;
+        o.textContent = c.label;
+        o.style.fontFamily = c.v;          // each option previews its own face
+        if (c.v === current) { o.selected = true; matched = true; }
+        sel.appendChild(o);
+      }
+      if (!matched) {                       // a hand-edited stack must not be lost
+        const o = document.createElement("option");
+        o.value = current; o.textContent = "自訂：" + current; o.selected = true;
+        sel.insertBefore(o, sel.firstChild);
+      }
+      sel.addEventListener("change", () => { live[f.k] = sel.value; applyPreview(); });
+      row.appendChild(sel);
+    } else {
+      const t = document.createElement("input");
+      t.type = "text"; t.value = live[f.k]; t.className = "wide";
+      t.addEventListener("input", () => { live[f.k] = t.value; applyPreview(); });
+      row.appendChild(t);
+    }
+    $(f.group).appendChild(row);
+  }
+}
+
+// <input type=color> only accepts #rrggbb, so named/short colours need normalising.
+function toHex(v) {
+  v = (v || "").trim();
+  if (/^#[0-9a-f]{6}$/i.test(v)) return v;
+  const probe = document.createElement("span");
+  probe.style.color = v;
+  document.body.appendChild(probe);
+  const rgb = getComputedStyle(probe).color.match(/\d+/g);
+  probe.remove();
+  if (!rgb) return "#000000";
+  return "#" + rgb.slice(0, 3).map(x => (+x).toString(16).padStart(2, "0")).join("");
+}
+
+async function load() {
+  const res = await fetch("/api/ui-tokens");
+  const data = await res.json();
+  if (!res.ok) { setStatus(data.detail || "載入失敗", "err"); return; }
+  saved = data.tokens;
+  live = { ...saved };
+  build();
+  applyPreview();
+  setStatus("已載入目前設定");
+}
+
+$("preview").addEventListener("load", applyPreview);   // re-apply after any reload
+
+$("reset").addEventListener("click", () => {
+  live = { ...saved };
+  build();
+  $("preview").contentWindow.location.reload();
+  setStatus("已回到最後儲存的狀態");
+});
+
+$("save").addEventListener("click", async () => {
+  $("save").disabled = true;
+  setStatus("儲存中…");
+  try {
+    const res = await fetch("/api/ui-tokens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tokens: live }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.status);
+    saved = data.tokens;
+    live = { ...saved };
+    build();
+    setStatus("已寫入 index.html 與 docs/index.html（備份：" + data.backup + "）", "ok");
+  } catch (e) {
+    setStatus("儲存失敗：" + e.message, "err");
+  } finally {
+    $("save").disabled = false;
+  }
+});
+
+$("revert").addEventListener("click", async () => {
+  if (!confirm("還原上一次儲存前的備份？目前未儲存的調整會遺失。")) return;
+  try {
+    const res = await fetch("/api/ui-tokens/revert", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.status);
+    saved = data.tokens;
+    live = { ...saved };
+    build();
+    $("preview").contentWindow.location.reload();
+    setStatus("已還原備份", "ok");
+  } catch (e) {
+    setStatus("還原失敗：" + e.message, "err");
+  }
+});
+
+load();
+</script>
+</body>
+</html>

@@ -264,14 +264,70 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 VECTORSTORE_DATASET = os.environ.get("VECTORSTORE_DATASET", "timhelloyee/notehandler-store")
 _hf_api = HfApi(token=HF_TOKEN) if HF_TOKEN else None
 
+# Whether sync is expected at all. On a Hugging Face Space (which sets SPACE_ID) the
+# container disk is wiped on every restart, so running without sync means silently
+# losing whatever users upload. Locally, no token just means development.
+SYNC_REQUIRED = bool(os.environ.get("SPACE_ID") or os.environ.get("NOTEHANDLER_REQUIRE_SYNC"))
+
+
+# --- sync health ----------------------------------------------------------------------
+# The app used to shrug off a failed restore and keep serving an empty store. A user saw
+# "尚無筆記" — indistinguishable from genuinely having no notes — and anything they
+# uploaded lived only on the container disk until the next restart erased it. That is
+# what happened on 2026-09-14 when the Space's HF_TOKEN stopped being valid.
+#
+#   ok           restored from the Dataset; changes are synced
+#   disabled     no token and none expected (local development)
+#   unavailable  the user's notes could not be loaded. Writes are REFUSED: syncing now
+#                would push an empty or partial store over the complete one in the Dataset
+#   unsaved      loaded fine, but a later sync failed. The local store is still complete,
+#                so the next write's sync repairs it — writes stay allowed
+_sync = {"state": "disabled", "message": ""}
+_unsynced_users: set[str] = set()
+
+
+class SyncUnavailableError(RuntimeError):
+    """Raised instead of writing when the store was never loaded from the Dataset."""
+
+
+def _set_sync(state: str, message: str = "") -> None:
+    _sync["state"], _sync["message"] = state, message
+
+
+def sync_status() -> dict:
+    return {"state": _sync["state"], "message": _sync["message"],
+            "writable": _sync["state"] != "unavailable"}
+
+
+def require_loaded() -> None:
+    """Refuse to act on a store that was never restored — see _sync above."""
+    if _sync["state"] == "unavailable":
+        raise SyncUnavailableError(_sync["message"])
+
+
+def _describe_sync_error(e: Exception) -> str:
+    """A reason a user can act on. The raw exception goes to the log, not the page: it
+    carries request ids and URLs that mean nothing to someone looking at their notes."""
+    text = repr(e)
+    if any(s in text for s in ("401", "403", "Invalid username or password",
+                               "RepositoryNotFound", "Unauthorized")):
+        return "雲端筆記庫拒絕了存取（HF_TOKEN 無效、已撤銷，或沒有這個 Dataset 的權限）"
+    return "暫時無法連線到雲端筆記庫"
+
 
 def _restore_from_dataset():
     """Pull saved vectorstores from the backing Dataset on startup so uploads survive
     restarts/rebuilds. First run (empty dataset) seeds it from the image's baked store.
-    Any failure (no/invalid token, offline) is logged and ignored — the app still runs
-    on the baked seed, just without persistence."""
+
+    Failure no longer passes silently: it sets the sync state, which blocks writes and
+    tells the user why their notes are missing."""
     if not _hf_api:
-        print("[rag_core] HF_TOKEN not set — vectorstore persistence disabled (ephemeral).")
+        if SYNC_REQUIRED:
+            _set_sync("unavailable", "伺服器沒有設定 HF_TOKEN，無法載入雲端筆記庫")
+            print("[rag_core] HF_TOKEN not set on a Space — notes unavailable, writes refused.")
+        else:
+            _set_sync("disabled", "本機模式，筆記不會同步到雲端")
+            print("[rag_core] HF_TOKEN not set — vectorstore persistence disabled (ephemeral).")
         return
     try:
         try:  # best-effort: needs write access; a read token can still restore below
@@ -290,8 +346,10 @@ def _restore_from_dataset():
         else:
             _persist_all()  # first run: initialize the dataset from the baked seed
             print(f"[rag_core] initialized {VECTORSTORE_DATASET} from baked seed.")
+        _set_sync("ok")
     except Exception as e:
-        print(f"[rag_core] vectorstore restore skipped ({e!r}); using local/baked store.")
+        _set_sync("unavailable", _describe_sync_error(e))
+        print(f"[rag_core] vectorstore restore FAILED ({e!r}); notes unavailable, writes refused.")
 
 
 def _persist_all():
@@ -305,19 +363,31 @@ def _persist_all():
         print(f"[rag_core] persist-all failed ({e!r}).")
 
 
-def _persist_user(user_id: str):
-    """Push one user's collection back to the Dataset after a change."""
+def _persist_user(user_id: str) -> bool:
+    """Push one user's collection back to the Dataset after a change. Returns whether the
+    change is now safe in the Dataset (True when sync is disabled — there is nothing to
+    lose that the user was promised)."""
     if not _hf_api:
-        return
+        return True
     name = _safe_name(user_id)
     folder = f"{VECTORSTORE_ROOT}/{name}"
     if not os.path.isdir(folder):
-        return
+        return True
     try:
         _hf_api.upload_folder(folder_path=folder, path_in_repo=name,
                               repo_id=VECTORSTORE_DATASET, repo_type="dataset")
     except Exception as e:
+        _unsynced_users.add(name)
+        if _sync["state"] != "unavailable":
+            _set_sync("unsaved", "最近的變更還沒有同步到雲端：" + _describe_sync_error(e))
         print(f"[rag_core] persist '{name}' failed ({e!r}).")
+        return False
+    # The whole folder was uploaded, so this also carries any change an earlier failed
+    # sync left behind for this user.
+    _unsynced_users.discard(name)
+    if _sync["state"] == "unsaved" and not _unsynced_users:
+        _set_sync("ok")
+    return True
 
 
 # --- original files -----------------------------------------------------------
@@ -713,6 +783,7 @@ def _add_note(user_id: str, file_id: str, text: str, kind: str, source: str,
     eval harness needs it to build control conditions (e.g. the same chunks with their
     ancestor prefixes removed) without that logic living here.
     """
+    require_loaded()
     collection = get_user_collection(user_id)
     if _note_exists(collection, file_id):
         return False
@@ -742,31 +813,54 @@ def add_text_note(user_id: str, file_id: str, content: str, source: str) -> bool
     return _add_note(user_id, file_id, content, "text", source)
 
 
+def _add_described_note(user_id: str, file_id: str, src_path: str, description: str,
+                        kind: str, source: str) -> None:
+    """Store a Gemini description together with the file it came from.
+
+    The original is written BEFORE _add_note runs, because _add_note is what syncs the
+    user's folder. main.py used to save the original afterwards, so the upload that went
+    to the Dataset never contained it — the file only reached the Dataset on the user's
+    next change, and a restart before then lost it for good.
+    """
+    if not description:
+        return
+    save_original(user_id, file_id, src_path)
+    try:
+        added = _add_note(user_id, file_id, description, kind, source)
+    except Exception:
+        _delete_original(user_id, file_id)
+        raise
+    if not added:
+        _delete_original(user_id, file_id)
+
+
 def add_image_note(user_id: str, file_id: str, image_path: str, source: str,
                    model: str | None = None) -> str:
-    """Describes the image with Gemini, embeds the description, stores it.
+    """Describes the image with Gemini, embeds the description, stores it with the image.
 
     Returns the generated description (or "" if the note already existed).
     """
+    require_loaded()   # before the Gemini call: no point spending quota on a refused write
     collection = get_user_collection(user_id)
     if _note_exists(collection, file_id):
         return ""
     description = describe_image(image_path, model=model)
-    _add_note(user_id, file_id, description, "image", source)
+    _add_described_note(user_id, file_id, image_path, description, "image", source)
     return description
 
 
 def add_pdf_note(user_id: str, file_id: str, pdf_path: str, source: str,
                  model: str | None = None) -> str:
-    """Describes the PDF with Gemini, embeds the description, stores it.
+    """Describes the PDF with Gemini, embeds the description, stores it with the PDF.
 
     Returns the generated description (or "" if the note already existed).
     """
+    require_loaded()
     collection = get_user_collection(user_id)
     if _note_exists(collection, file_id):
         return ""
     description = describe_pdf(pdf_path, model=model)
-    _add_note(user_id, file_id, description, "pdf", source)
+    _add_described_note(user_id, file_id, pdf_path, description, "pdf", source)
     return description
 
 
@@ -804,6 +898,7 @@ def update_note(user_id: str, file_id: str, new_text: str) -> bool:
     its type and source. No Gemini call — the description was already generated; this is
     the human fixing what the model misread. False if the note doesn't exist.
     """
+    require_loaded()   # checked before the delete below, not just inside _add_note
     collection = get_user_collection(user_id)
     got = collection.get(include=["metadatas"])
     ids = [i for i in got["ids"] if _base_id(i) == file_id]
@@ -842,6 +937,7 @@ def list_notes(user_id: str) -> list[dict]:
 
 def delete_note(user_id: str, file_id: str) -> bool:
     """Deletes a note and all its chunks. Returns False if it wasn't found."""
+    require_loaded()
     collection = get_user_collection(user_id)
     ids = [i for i in collection.get()["ids"] if _base_id(i) == file_id]
     if not ids:
@@ -986,6 +1082,9 @@ def _whole_corpus(collection) -> list[str] | None:
 
 
 def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = None) -> str:
+    # An unloaded store would answer every question with 「沒有記載相關訊息」, which reads
+    # as a statement about the user's notes rather than about the server.
+    require_loaded()
     docs = _whole_corpus(get_user_collection(user_id))
     if docs is None:
         docs = _retrieve(user_id, question, top_k)

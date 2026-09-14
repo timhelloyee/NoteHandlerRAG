@@ -5,33 +5,55 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NoteHandlerRAG</title>
   <style>
+    /* Every value the UI editor at /ui-editor can change lives in this block, and
+       nowhere else. Keeping them here is what makes the editor's write-back safe: it
+       rewrites exactly this :root rule and never touches the rest of the file. */
     :root {
       --card: #ffffff;
       --ink: #1f2430;
       --muted: #6b7280;
       --border: #e6e8ef;
       --accent: #4f46e5;
-      --accent-2: #2563eb;
+      --accent-2: #4c80f0;
       --danger: #dc2626;
       --radius: 14px;
       --shadow: 0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.06);
-      font-family: system-ui, "Segoe UI", "Noto Sans TC", sans-serif;
+      --page-width: 780px;
+      --bg-top: #e9eefb;
+      --bg-body: #f6f8fc;
+      --font-size: 16px;
+      --line-height: 1.6;
+      --font-family: system-ui, "Segoe UI", "Noto Sans TC", sans-serif;
+      --font-heading: system-ui, "Segoe UI", "Noto Sans TC", sans-serif;
+      --font-mono: ui-monospace, "Cascadia Code", Consolas, "Noto Sans Mono", monospace;
+      font-family: var(--font-family);
+      font-size: var(--font-size);
     }
     * { box-sizing: border-box; }
     body {
-      max-width: 780px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem;
-      color: var(--ink); line-height: 1.6; min-height: 100vh;
-      background: linear-gradient(180deg, #e9eefb 0%, #f6f8fc 260px, #f6f8fc 100%);
+      max-width: var(--page-width); margin: 0 auto; padding: 2.5rem 1.25rem 4rem;
+      color: var(--ink); line-height: var(--line-height); min-height: 100vh;
+      background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-body) 260px, var(--bg-body) 100%);
     }
 
     /* Header */
     .app-header { text-align: center; margin-bottom: 2rem; }
     .app-header h1 {
+      font-family: var(--font-heading);
       font-size: 2.1rem; margin: 0 0 .35rem; font-weight: 800; letter-spacing: -.02em;
       background: linear-gradient(90deg, var(--accent), var(--accent-2));
       -webkit-background-clip: text; background-clip: text; color: transparent;
     }
     .tagline { color: var(--muted); margin: 0; font-size: .95rem; }
+
+    /* Cloud-sync banner: why notes are missing, or that a change has not been saved. */
+    .banner {
+      margin: 0 0 1.25rem; padding: .75rem 1rem; border-radius: 10px;
+      border: 1px solid var(--border); font-size: .92rem; line-height: 1.6;
+    }
+    .banner.error { background: #fdecea; border-color: #f3b8b1; color: #8a1c12; }
+    .banner.warn  { background: #fdf3dc; border-color: #f0d49a; color: #7a4a05; }
+    .banner.info  { background: var(--card); color: var(--muted); }
 
     /* Cards */
     section {
@@ -91,6 +113,9 @@
     #answer p:first-child, #answer h1:first-child, #answer h2:first-child, #answer h3:first-child, #answer ul:first-child, #answer ol:first-child { margin-top: 0; }
     #answer p:last-child, #answer ul:last-child, #answer ol:last-child { margin-bottom: 0; }
     #answer pre { background: #ececf3; padding: .6rem; border-radius: 8px; overflow-x: auto; }
+    #answer code, #answer pre, .preview code, .preview pre, .full code, .full pre {
+      font-family: var(--font-mono);
+    }
     #answer code { background: #ececf3; padding: .1rem .3rem; border-radius: 4px; }
     #answer pre code { background: none; padding: 0; }
 
@@ -198,12 +223,13 @@
     <p class="tagline">多模態筆記檢索 · 文字、圖片與 PDF 智慧問答</p>
   </header>
 
+  <div id="syncBanner" class="banner" role="status" hidden></div>
+
   <section>
     <label>Google 帳號</label>
     <div id="gsiButton"></div>
-    <p id="googleStatus" class="muted">使用 Google 登入即可用你的帳號 Email 作為使用者。
+    <p id="googleStatus" class="muted">使用 Google 登入後，才能看到與管理你的筆記。
       <a id="signoutLink" href="#" style="display:none">登出</a></p>
-    <input type="hidden" id="user" value="">
   </section>
 
   <section>
@@ -220,7 +246,7 @@
 
   <section>
     <label>已儲存的筆記</label>
-    <p class="muted">切換上方使用者即可看到該使用者儲存的筆記。</p>
+    <p class="muted">只會顯示你登入的 Google 帳號所儲存的筆記。</p>
     <ul id="notes"></ul>
     <button id="refreshBtn">重新整理</button>
 
@@ -233,13 +259,87 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
-    const userId = () => $("user").value.trim();
 
     // Backend base URL: on GitHub Pages, point at the Hugging Face Space; otherwise
     // (served by FastAPI locally or on the Space itself) use same-origin relative paths.
     const API_BASE = location.hostname.endsWith("github.io")
       ? "https://timhelloyee-notehandler.hf.space"   // Hugging Face Space backend
       : "";
+
+    // --- Signed-in state ---------------------------------------------------------
+    // The Google ID token itself is what proves who you are; the server verifies it on
+    // every request. The page used to send only the email it decoded, which the server
+    // believed — so anyone who knew an address could open that person's notes.
+    const TOKEN_KEY = "nh_token";
+    let idToken = null;
+
+    // Local development only: dev_server.py accepts X-Dev-User instead of a Google
+    // sign-in. Never sent from any other host, and the deployed server ignores it.
+    const IS_LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+    const DEV_USER = IS_LOCAL ? localStorage.getItem("nh_dev_user") : null;
+
+    function tokenClaims(token) {
+      try { return token ? decodeJwt(token) : null; } catch (e) { return null; }
+    }
+    // Treat a token within a minute of expiry as already expired, so a request is not
+    // sent with a token that dies on the way.
+    function tokenUsable(token) {
+      const c = tokenClaims(token);
+      return !!(c && c.email && c.exp * 1000 > Date.now() + 60000);
+    }
+    // For display and "please sign in" checks only — never sent to the server.
+    const userId = () => (idToken && tokenClaims(idToken)?.email) || DEV_USER || "";
+
+    // Every per-user request goes through here so the credential is attached in one
+    // place. A 401 means the token expired or was rejected: sign out visibly rather than
+    // leaving a page that silently fails.
+    async function api(path, opts = {}) {
+      const headers = new Headers(opts.headers || {});
+      if (idToken) headers.set("Authorization", "Bearer " + idToken);
+      else if (DEV_USER) headers.set("X-Dev-User", DEV_USER);
+      const res = await fetch(API_BASE + path, { ...opts, headers });
+      if (res.status === 401 && idToken) signedOut("登入已過期，請重新登入。");
+      return res;
+    }
+
+    // --- Cloud sync state --------------------------------------------------------
+    // If the server could not load the notes from the cloud, an empty list would look
+    // exactly like having no notes. The banner says what is actually wrong, and writes
+    // are switched off because the server refuses them in that state.
+    let writable = true;
+
+    function applySync(sync) {
+      const b = $("syncBanner");
+      const state = sync && sync.state;
+      writable = !sync || sync.writable !== false;
+      $("uploadBtn").disabled = !writable;
+      document.querySelectorAll("#notes button.edit, #notes button.del, .editor .save")
+        .forEach(x => { x.disabled = !writable; });
+      if (state === "unavailable") {
+        b.className = "banner error";
+        b.textContent = "無法載入你的雲端筆記庫：" + (sync.message || "原因不明")
+          + "。為了避免覆蓋雲端上的筆記，目前暫停上傳、修改、刪除與問答。";
+        b.hidden = false;
+      } else if (state === "unsaved") {
+        b.className = "banner warn";
+        b.textContent = (sync.message || "最近的變更還沒有同步到雲端")
+          + "。下一次上傳或修改時會自動重試。";
+        b.hidden = false;
+      } else if (state === "disabled") {
+        b.className = "banner info";
+        b.textContent = "本機模式：筆記不會同步到雲端。";
+        b.hidden = false;
+      } else {
+        b.hidden = true;
+      }
+    }
+
+    async function checkSync() {
+      try {
+        const res = await fetch(API_BASE + "/api/health");
+        if (res.ok) applySync((await res.json()).sync);
+      } catch (e) { /* server unreachable: requests will report their own errors */ }
+    }
 
     // Pull a readable message from a JSON error body (detail may be a string, an
     // object/array, or absent) so we never render the useless "[object Object]".
@@ -345,10 +445,10 @@
       $("askBtn").disabled = true;
       $("answer").textContent = "思考中…";
       try {
-        const res = await fetch(API_BASE + "/api/query", {
+        const res = await api("/api/query", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: userId(), question, top_k: 10, model: $("model").value }),
+          body: JSON.stringify({ question, top_k: 10, model: $("model").value }),
         });
         const data = await res.json();
         if (res.ok) { renderRich($("answer"), data.answer); }
@@ -367,20 +467,26 @@
       $("uploadBtn").disabled = true;
       $("uploadResult").textContent = "上傳中…（圖片 / PDF 需呼叫 Gemini 產生描述，可能稍久）";
       const fd = new FormData();
-      fd.append("user_id", userId());
       fd.append("file", file);
       fd.append("model", $("model").value);
       try {
-        const res = await fetch(API_BASE + "/api/upload", { method: "POST", body: fd });
+        const res = await api("/api/upload", { method: "POST", body: fd });
         const data = await res.json();
         if (!res.ok) { $("uploadResult").textContent = "錯誤：" + errText(data, res); }
         else if (data.added === false) { $("uploadResult").textContent = data.id + " 已存在，跳過"; }
-        else { $("uploadResult").textContent = data.id + " 已加入" + (data.description ? "（描述：" + data.description.slice(0, 60) + "…）" : ""); }
+        else {
+          // Say so on the upload itself when the note did not reach the cloud, instead
+          // of letting the user find out after the server restarts.
+          const unsynced = data.sync === "unsaved" ? "（注意：尚未同步到雲端）" : "";
+          $("uploadResult").textContent = data.id + " 已加入" + unsynced
+            + (data.description ? "（描述：" + data.description.slice(0, 60) + "…）" : "");
+        }
         loadNotes();
       } catch (e) {
         $("uploadResult").textContent = "上傳失敗：" + e;
       } finally {
-        $("uploadBtn").disabled = false;
+        $("uploadBtn").disabled = !writable;
+        checkSync();
       }
     }
 
@@ -391,8 +497,7 @@
 
     async function fetchNoteText(id) {
       if (noteTextCache.has(id)) return noteTextCache.get(id);
-      const res = await fetch(API_BASE + "/api/notes/" + encodeURIComponent(id)
-        + "?user_id=" + encodeURIComponent(userId()));
+      const res = await api("/api/notes/" + encodeURIComponent(id));
       const data = await res.json();
       if (!res.ok) throw new Error(errText(data, res));
       noteTextCache.set(id, data.text);
@@ -417,22 +522,34 @@
 
     async function loadNotes() {
       noteTextCache.clear();
+      const ul = $("notes");
+      // Open editors hold blob: URLs for their originals; release them before the rows
+      // they belong to are thrown away, or each one keeps a whole PDF in memory.
+      ul.querySelectorAll(".editor").forEach(e => e._release && e._release());
       if (!userId()) {
-        $("notes").innerHTML = "<li class='muted'>請先使用 Google 登入</li>";
+        ul.innerHTML = "<li class='muted'>請先使用 Google 登入</li>";
         return;
       }
-      const ul = $("notes");
       let notes;
       try {
-        const res = await fetch(API_BASE + "/api/notes?user_id=" + encodeURIComponent(userId()));
+        const res = await api("/api/notes");
         notes = await res.json();
+        if (!res.ok) {
+          ul.innerHTML = "";
+          ul.appendChild(Object.assign(document.createElement("li"),
+            { className: "muted", textContent: "載入筆記失敗：" + errText(notes, res) }));
+          return;
+        }
       } catch (e) {
         ul.innerHTML = "<li class='muted'>載入筆記失敗，請稍後重試</li>";
         return;
       }
       ul.innerHTML = "";
       if (!Array.isArray(notes) || notes.length === 0) {
-        ul.innerHTML = "<li class='muted'>（尚無筆記）</li>";
+        // Not "no notes" when the store never loaded — that was the misleading message.
+        ul.innerHTML = writable
+          ? "<li class='muted'>（尚無筆記）</li>"
+          : "<li class='muted'>雲端筆記庫目前無法載入，所以這裡暫時看不到你的筆記。</li>";
         return;
       }
       for (const n of notes) {
@@ -449,6 +566,7 @@
         actions.className = "note-actions";
         const edit = document.createElement("button");
         edit.className = "edit";
+        edit.disabled = !writable;
         edit.textContent = "編輯";
         edit.addEventListener("click", () => openEditor(li, n.id, n.has_original, n.type));
         // The list preview is capped at 240 chars server-side, so a 23-page PDF showed
@@ -504,6 +622,7 @@
         });
         const del = document.createElement("button");
         del.className = "del";
+        del.disabled = !writable;
         del.textContent = "刪除";
         del.addEventListener("click", () => deleteNote(n.id));
         actions.appendChild(more);
@@ -570,34 +689,59 @@
       return { wrap, goto };
     }
 
-    // The original file, rendered next to the extracted text. Images go in an <img>,
-    // PDFs into the double-buffered viewer above.
-    // Returns a `goto(page)` for PDFs so the page buttons can drive it.
+    // The original file, rendered next to the extracted text.
+    //
+    // It is fetched with the sign-in token and handed to the <img>/<iframe> as a blob:
+    // URL. Those elements cannot send an Authorization header, and putting the token or
+    // the email in their src would leak it into history and server logs. A side benefit:
+    // the PDF is downloaded once per editor, so jumping pages never re-fetches it.
+    //
+    // Returns `goto(page)` for PDFs. Jumps requested before the file has arrived are
+    // remembered and applied once it does. `release()` frees the blob.
     function originalPane(id, type) {
       const pane = document.createElement("div");
       pane.className = "original";
       const label = document.createElement("p");
       label.className = "pane-label";
-      label.textContent = "原始筆記";
+      label.textContent = "原始筆記（載入中…）";
       pane.appendChild(label);
-      const src = API_BASE + "/api/notes/" + encodeURIComponent(id)
-        + "/original?user_id=" + encodeURIComponent(userId());
-      let goto = null;
-      if (type === "pdf") {
-        const v = framePdf(src, id);
-        pane.appendChild(v.wrap);
-        goto = v.goto;
-      } else {
-        const img = document.createElement("img");
-        img.src = src;
-        img.alt = id;
-        img.addEventListener("error", () => {
-          img.remove();
-          label.textContent = "原始檔載入失敗";
-        });
-        pane.appendChild(img);
-      }
-      return { pane, goto, src };
+
+      let blobUrl = null, viewer = null, pendingPage = null;
+      const goto = type === "pdf"
+        ? (n) => { if (viewer) viewer.goto(n); else pendingPage = n; }
+        : null;
+
+      (async () => {
+        try {
+          const res = await api("/api/notes/" + encodeURIComponent(id) + "/original");
+          if (!res.ok) {
+            let detail = "";
+            try { detail = errText(await res.json(), res); } catch (e) { detail = String(res.status); }
+            throw new Error(detail);
+          }
+          blobUrl = URL.createObjectURL(await res.blob());
+          label.textContent = "原始筆記";
+          if (type === "pdf") {
+            viewer = framePdf(blobUrl, id);
+            pane.appendChild(viewer.wrap);
+            if (pendingPage) viewer.goto(pendingPage);
+          } else {
+            const img = document.createElement("img");
+            img.src = blobUrl;
+            img.alt = id;
+            img.addEventListener("error", () => {
+              img.remove();
+              label.textContent = "原始檔無法顯示";
+            });
+            pane.appendChild(img);
+          }
+        } catch (e) {
+          label.textContent = "原始檔載入失敗：" + e.message;
+        }
+      })();
+
+      const release = () => { if (blobUrl) URL.revokeObjectURL(blobUrl); blobUrl = null; };
+      return { pane, goto, release };
     }
 
     // PDF extractions carry "## 第 N 頁" section markers (describe_pdf writes them).
@@ -634,8 +778,7 @@
       li.appendChild(box);
       let text;
       try {
-        const res = await fetch(API_BASE + "/api/notes/" + encodeURIComponent(id)
-          + "?user_id=" + encodeURIComponent(userId()));
+        const res = await api("/api/notes/" + encodeURIComponent(id));
         const data = await res.json();
         if (!res.ok) throw new Error(errText(data, res));
         text = data.text;
@@ -683,7 +826,9 @@
       pvBar.appendChild(pvLabel);
       pvBar.appendChild(pvToggle);
       const save = document.createElement("button");
+      save.className = "save";
       save.textContent = "儲存";
+      save.disabled = !writable;
       const cancel = document.createElement("button");
       cancel.className = "edit";
       cancel.textContent = "取消";
@@ -697,21 +842,24 @@
         save.disabled = true;
         hint.textContent = "儲存中…";
         try {
-          const res = await fetch(API_BASE + "/api/notes/" + encodeURIComponent(id), {
+          const res = await api("/api/notes/" + encodeURIComponent(id), {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ user_id: userId(), content: ta.value }),
+            body: JSON.stringify({ content: ta.value }),
           });
           const data = await res.json();
           if (!res.ok) throw new Error(errText(data, res));
-          box.remove();
+          closeEditor();
           loadNotes();
+          checkSync();
         } catch (e) {
           hint.textContent = "儲存失敗：" + e.message;
           save.disabled = false;
         }
       });
-      cancel.addEventListener("click", () => box.remove());
+      // Closing an editor frees the original's blob URL, which can hold a whole PDF.
+      const closeEditor = () => { if (box._release) box._release(); box.remove(); };
+      cancel.addEventListener("click", closeEditor);
       right.appendChild(rightLabel);
       right.appendChild(ta);
       right.appendChild(pvBar);
@@ -722,7 +870,8 @@
       right.appendChild(hint);
       if (hasOriginal) {
         box.classList.add("split");
-        const { pane, goto } = originalPane(id, type);
+        const { pane, goto, release } = originalPane(id, type);
+        box._release = release;
         const bar = pageJumper(text, goto, ta);
         if (bar) pane.appendChild(bar);
         box.appendChild(pane);   // left
@@ -738,10 +887,7 @@
     async function deleteNote(id) {
       if (!confirm(`確定要刪除「${id}」嗎？\n此動作無法復原。`)) return;
       try {
-        const res = await fetch(
-          API_BASE + "/api/notes/" + encodeURIComponent(id) + "?user_id=" + encodeURIComponent(userId()),
-          { method: "DELETE" }
-        );
+        const res = await api("/api/notes/" + encodeURIComponent(id), { method: "DELETE" });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           alert("刪除失敗：" + errText(data, res));
@@ -750,6 +896,8 @@
         loadNotes();
       } catch (e) {
         alert("刪除失敗：" + e);
+      } finally {
+        checkSync();
       }
     }
 
@@ -769,47 +917,74 @@
       return JSON.parse(json);
     }
 
+    // Updates the status line without wiping the 登出 link that lives inside it.
+    function setStatus(text) { $("googleStatus").firstChild.textContent = text; }
+
     // 設定目前使用者並更新畫面（登入成功或從上次登入還原時共用）。
-    function setUser(email, label) {
-      $("user").value = email;
-      $("googleStatus").firstChild.textContent = label;
+    function setUser(label) {
+      setStatus(label);
       $("signoutLink").style.display = "";
       $("answer").textContent = "";
       $("uploadResult").textContent = "";
       loadNotes();
     }
 
-    // 登入成功：用 Google 帳號 Email 當作使用者 id，記住到 localStorage，
-    // 之後重新整理頁面不必再登入一次。
+    // 登入成功：保存 Google 回傳的 ID token（不是只存 email）。之後每個請求都帶上它，
+    // 由伺服器驗證簽章與到期時間，才認定你是誰。
     function handleGoogleCredential(response) {
-      try {
-        const info = decodeJwt(response.credential);
-        if (!info.email) return;
-        localStorage.setItem("nh_user", info.email);
-        setUser(info.email, "已連結：" + info.email + (info.name ? "（" + info.name + "）" : ""));
-      } catch (e) {
-        $("googleStatus").textContent = "Google 登入解析失敗：" + e;
+      const info = tokenClaims(response.credential);
+      if (!info || !info.email) {
+        setStatus("Google 登入失敗，請再試一次。");
+        return;
       }
+      idToken = response.credential;
+      localStorage.setItem(TOKEN_KEY, idToken);
+      setUser("已連結：" + info.email + (info.name ? "（" + info.name + "）" : ""));
+    }
+
+    // Token expired or rejected by the server. Say so, clear the list, and offer Google's
+    // one-tap prompt so a returning user can get back in without hunting for the button.
+    function signedOut(message) {
+      idToken = null;
+      localStorage.removeItem(TOKEN_KEY);
+      $("signoutLink").style.display = "none";
+      setStatus(message);
+      $("notes").innerHTML = "<li class='muted'>請先使用 Google 登入</li>";
+      if (window.google && google.accounts && google.accounts.id) google.accounts.id.prompt();
     }
 
     $("signoutLink").addEventListener("click", (ev) => {
       ev.preventDefault();
-      localStorage.removeItem("nh_user");
+      localStorage.removeItem(TOKEN_KEY);
+      if (window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect();
       location.reload();
     });
 
-    // 還原上次登入的帳號（與 Google 登入同等信任層級：目前後端僅以 email 區分使用者）。
-    const savedUser = localStorage.getItem("nh_user");
-    if (savedUser) setUser(savedUser, "已連結（上次登入）：" + savedUser);
+    // Restore the previous sign-in only while its token is still valid (Google ID tokens
+    // last about an hour). "nh_user" held a bare email under the old scheme and no longer
+    // signs anyone in, so it is removed rather than trusted.
+    localStorage.removeItem("nh_user");
+    const savedToken = localStorage.getItem(TOKEN_KEY);
+    const restored = tokenUsable(savedToken);
+    if (restored) {
+      idToken = savedToken;
+    } else if (savedToken) {
+      localStorage.removeItem(TOKEN_KEY);
+      setStatus("上次的登入已過期，請重新登入。");
+    }
 
     function initGoogle() {
       if (!(window.google && google.accounts && google.accounts.id)) return;
       if (GOOGLE_CLIENT_ID.startsWith("YOUR_")) {
-        $("googleStatus").textContent = "尚未設定 Google 用戶端 ID（請見 index.html 中的 GOOGLE_CLIENT_ID）。";
+        setStatus("尚未設定 Google 用戶端 ID（請見 index.html 中的 GOOGLE_CLIENT_ID）。");
         return;
       }
-      google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleGoogleCredential });
+      // auto_select lets a returning user be signed straight back in once their token
+      // has expired, provided they have signed in to this app before.
+      google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleGoogleCredential,
+                                      auto_select: true });
       google.accounts.id.renderButton($("gsiButton"), { theme: "outline", size: "large", text: "signin_with", shape: "pill" });
+      if (!idToken && !DEV_USER) google.accounts.id.prompt();
     }
     window.addEventListener("load", initGoogle);
 
@@ -817,7 +992,19 @@
     $("uploadBtn").addEventListener("click", upload);
     $("refreshBtn").addEventListener("click", loadNotes);
     loadModels();
-    if (!savedUser) loadNotes();  // 已還原帳號時 setUser 已載入過
+
+    // Sync state first: it decides whether an empty list means "no notes" or "could not
+    // load them", and whether the write buttons are usable.
+    (async () => {
+      await checkSync();
+      if (restored) {
+        setUser("已連結（上次登入）：" + tokenClaims(idToken).email);
+      } else if (DEV_USER) {
+        setUser("本機開發模式：" + DEV_USER);
+      } else {
+        loadNotes();
+      }
+    })();
   </script>
 </body>
 </html>

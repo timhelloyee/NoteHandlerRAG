@@ -37,3 +37,6 @@ eval/RESULTS_gating.txt
 
 # machine-local Claude Code permissions (launch.json is shared, this is not)
 .claude/settings.local.json
+
+# UI editor undo snapshot, not source
+*.html.bak
