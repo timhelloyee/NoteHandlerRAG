@@ -470,8 +470,9 @@ to be `2-2cos`; the filter bug was found by noticing `top_k` had no effect. Keep
 7. **Free-tier scaling** — CPU-only, and every write is a Dataset round trip.
 8. **`embed_folder.py` is a local CLI, not used by the app**, and chunks with a *different*
    id scheme (`a.txt#0` at 140 chars). Pointing it at the app's store would duplicate
-   content. The notebooks (`NoteHandler_Input.ipynb`, `NoteHandler_opus_Output.ipynb`) are
-   likewise historical.
+   content. The old notebooks were removed on 2026-09-14 and replaced by
+   `notehandler_input.py` / `notehandler_output.py`, which call `app/rag_core.py` and use
+   the isolated `.devstore/` (the repo now ignores `*.ipynb`).
 
 ---
 

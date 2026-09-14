@@ -9,7 +9,7 @@ Don't point both at the same store: the mixed id schemes would duplicate content
 
 Retrieval embedder is intfloat/multilingual-e5-base (繁中+英文皆強，跨語言檢索佳)，
 取代原本對中文較弱的 CLIP 文字編碼器。E5 需要前綴：文件用 "passage: "，查詢用
-"query: "（查詢端在 test_query.py / notebook 中處理）。
+"query: "（查詢端請用 notehandler_output.py）。
 
 Usage:
     python embed_folder.py alice
@@ -33,7 +33,7 @@ for _key in ("GEMINI_API_KEY_PRIMARY", "GEMINI_API_KEY_SECONDARY"):
     if not os.environ.get(_key):
         raise RuntimeError(f"缺少環境變數 {_key}，請在 .env 檔中設定")
 
-# 兩把金鑰：圖片描述優先用備用金鑰（與 Input.ipynb 一致），失敗時改用主要金鑰
+# 兩把金鑰：圖片描述優先用備用金鑰（與 app/rag_core.py 一致），失敗時改用主要金鑰
 gemini_clients = [
     genai.Client(api_key=os.environ["GEMINI_API_KEY_SECONDARY"]),
     genai.Client(api_key=os.environ["GEMINI_API_KEY_PRIMARY"]),

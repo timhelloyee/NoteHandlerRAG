@@ -71,7 +71,17 @@ inside the Hugging Face Space iframe — open the Space in its own tab.
 
 - `docs/index.html` is a copy of `app/static/index.html` for GitHub Pages — keep them in
   sync when editing the frontend.
-- [embed_folder.py](embed_folder.py) and the notebooks are local experiments; the CLI
-  chunks text (ids like `a.txt#0`) which is **incompatible** with the app's whole-document
-  ids — don't point them at the same store the app uses.
+- [notehandler_input.py](notehandler_input.py) (add / delete notes) and
+  [notehandler_output.py](notehandler_output.py) (list notes / ask a question) are the
+  command-line versions of the app. They call `app/rag_core.py`, so notes are stored
+  exactly as a web upload would store them, and like `dev_server.py` they use `.devstore/`
+  and never touch the private Dataset:
+
+  ```bash
+  python notehandler_input.py add docs/a.txt --user alice --category 生物
+  python notehandler_output.py ask "粒線體的功能是什麼？" --user alice
+  ```
+- [embed_folder.py](embed_folder.py) is an older local experiment; it chunks text with a
+  different id scheme (`a.txt#0`) that is **incompatible** with the app's store — don't
+  point it at a store the app uses.
 - `vectorstores/` and `.env` are git-ignored by design (privacy / secrets).

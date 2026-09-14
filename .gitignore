@@ -3,8 +3,9 @@
 .env.*
 !.env.example
 
-# Original notebook kept local only (contains hardcoded keys)
-NoteHandler.ipynb
+# No notebooks: the project uses plain Python scripts (notehandler_input.py /
+# notehandler_output.py). Notebooks also save their outputs, which here meant note text.
+*.ipynb
 
 # Vector stores — data lives only in the private HF Dataset, never committed here
 # (avoids leaking user emails / note content in a public repo).
