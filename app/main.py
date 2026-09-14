@@ -3,13 +3,17 @@
 Run locally:
     uvicorn app.main:app --reload
 
-Endpoints (all /api/notes*, /api/query and /api/upload need a signed-in user):
-    GET  /                -> the web UI (static/index.html)
-    POST /api/query       -> ask a question about your notes
-    POST /api/upload      -> upload a text, image, or PDF note
-    GET  /api/notes       -> list your stored notes
-    DELETE /api/notes/{id}-> delete a note
-    GET  /api/health      -> liveness plus cloud-sync state (no sign-in needed)
+Endpoints (all /api/notes*, /api/categories*, /api/query and /api/upload need a
+signed-in user):
+    GET  /                          -> the web UI (static/index.html)
+    POST /api/query                 -> ask a question, optionally inside one category
+    POST /api/upload                -> upload a text, image, or PDF note into a category
+    GET  /api/notes                 -> list your stored notes (each with its category)
+    DELETE /api/notes/{id}          -> delete a note
+    POST /api/notes/{id}/move       -> put a note into another category
+    GET/POST /api/categories        -> list / create categories
+    PUT/DELETE /api/categories/{id} -> rename / delete a category (its notes are kept)
+    GET  /api/health                -> liveness plus cloud-sync state (no sign-in needed)
 """
 import os
 import re
@@ -115,6 +119,22 @@ def _sync_unavailable(_: Request, exc: rag_core.SyncUnavailableError):
     return JSONResponse(status_code=503, content={
         "detail": f"雲端筆記庫目前無法載入（{exc}）。為了避免覆蓋雲端上的筆記，暫停上傳、修改、刪除與問答。"})
 
+@app.exception_handler(rag_core.CategoryNotFoundError)
+def _category_not_found(_: Request, exc: rag_core.CategoryNotFoundError):
+    return JSONResponse(status_code=404, content={"detail": "找不到這個類別，可能已被刪除，請重新整理"})
+
+
+@app.exception_handler(rag_core.CategoryError)
+def _category_error(_: Request, exc: rag_core.CategoryError):
+    return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
+
+
+def _category_param(value: str | None) -> str | None:
+    """'' and None both mean uncategorized / no category chosen."""
+    value = (value or "").strip()
+    return value or None
+
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 TEXT_EXTS = {".txt", ".md"}
@@ -126,6 +146,7 @@ class QueryRequest(BaseModel):
     question: str
     top_k: int = 10
     model: str | None = None
+    category: str | None = None     # None: search every category
 
 
 class QueryResponse(BaseModel):
@@ -150,7 +171,8 @@ def query(req: QueryRequest, user: str = Depends(current_user)):
         raise HTTPException(status_code=400, detail="問題不可為空")
     model = rag_core.resolve_model(req.model)
     try:
-        answer = rag_core.rag_query(user, req.question, top_k=req.top_k, model=model)
+        answer = rag_core.rag_query(user, req.question, top_k=req.top_k, model=model,
+                                    category=_category_param(req.category))
     except rag_core.ModelUnavailableError:
         raise HTTPException(status_code=503, detail=_busy_detail(model))
     return QueryResponse(answer=answer, model=model)
@@ -170,10 +192,12 @@ def _decode_text(raw: bytes) -> str:
 
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...), model: str = Form(None),
-                 user: str = Depends(current_user)):
+                 category: str = Form(None), user: str = Depends(current_user)):
     rag_core.require_loaded()   # refuse before reading the upload or spending Gemini quota
     user_id = user
     model = rag_core.resolve_model(model)
+    category = _category_param(category)
+    rag_core._require_category(user_id, category)   # a 404 now, not after a Gemini call
 
     file_id = os.path.basename(file.filename or "")
     if not file_id:
@@ -191,20 +215,23 @@ async def upload(file: UploadFile = File(...), model: str = Form(None),
         # restart. The originals are now saved inside add_*_note, before its sync runs.
         if ext in TEXT_EXTS:
             content = _decode_text(Path(tmp_path).read_bytes())
-            added = rag_core.add_text_note(user_id, file_id, content, source=f"upload/{file_id}")
-            return {"id": file_id, "type": "text", "added": added,
+            added = rag_core.add_text_note(user_id, file_id, content, source=f"upload/{file_id}",
+                                           category=category)
+            return {"id": file_id, "type": "text", "added": added, "category": category,
                     "sync": rag_core.sync_status()["state"]}
         elif ext in IMAGE_EXTS:
             description = rag_core.add_image_note(user_id, file_id, tmp_path,
-                                                  source=f"upload/{file_id}", model=model)
+                                                  source=f"upload/{file_id}", model=model,
+                                                  category=category)
             return {"id": file_id, "type": "image", "added": bool(description),
-                    "description": description, "model": model,
+                    "description": description, "model": model, "category": category,
                     "sync": rag_core.sync_status()["state"]}
         elif ext in PDF_EXTS:
             description = rag_core.add_pdf_note(user_id, file_id, tmp_path,
-                                                source=f"upload/{file_id}", model=model)
+                                                source=f"upload/{file_id}", model=model,
+                                                category=category)
             return {"id": file_id, "type": "pdf", "added": bool(description),
-                    "description": description, "model": model,
+                    "description": description, "model": model, "category": category,
                     "sync": rag_core.sync_status()["state"]}
         else:
             raise HTTPException(status_code=415, detail=f"Unsupported file type: {ext}")
@@ -251,7 +278,7 @@ def note_original(file_id: str, request: Request, user: str = Depends(current_us
     <img>/<iframe> as a blob: URL, because those elements cannot send headers — and
     putting a token or an email in their src would leak it into logs and history.
     """
-    path = rag_core.get_original(user, file_id)
+    path = rag_core.find_original(user, file_id)
     if not path:
         raise HTTPException(status_code=404,
                             detail=f"沒有保留 {file_id} 的原始檔（可能是在此功能上線前上傳的）")
@@ -290,6 +317,46 @@ def remove_note(file_id: str, user: str = Depends(current_user)):
     if not rag_core.delete_note(user, file_id):
         raise HTTPException(status_code=404, detail=f"找不到筆記：{file_id}")
     return {"deleted": file_id, "sync": rag_core.sync_status()["state"]}
+
+
+class NoteMove(BaseModel):
+    category: str | None = None     # None: uncategorized
+
+
+@app.post("/api/notes/{file_id}/move")
+def move_note(file_id: str, req: NoteMove, user: str = Depends(current_user)):
+    """Drop a note into another category. Moves the stored vectors and original as they
+    are — no re-embedding, no Gemini call."""
+    category = _category_param(req.category)
+    if not rag_core.move_note(user, file_id, category):
+        raise HTTPException(status_code=404, detail=f"找不到筆記：{file_id}")
+    return {"id": file_id, "category": category, "sync": rag_core.sync_status()["state"]}
+
+
+class CategoryBody(BaseModel):
+    name: str
+
+
+@app.get("/api/categories")
+def categories(user: str = Depends(current_user)):
+    return rag_core.list_categories(user)
+
+
+@app.post("/api/categories")
+def create_category(req: CategoryBody, user: str = Depends(current_user)):
+    return {**rag_core.create_category(user, req.name), "sync": rag_core.sync_status()["state"]}
+
+
+@app.put("/api/categories/{category}")
+def rename_category(category: str, req: CategoryBody, user: str = Depends(current_user)):
+    return {**rag_core.rename_category(user, category, req.name),
+            "sync": rag_core.sync_status()["state"]}
+
+
+@app.delete("/api/categories/{category}")
+def delete_category(category: str, user: str = Depends(current_user)):
+    moved = rag_core.delete_category(user, category)
+    return {"deleted": category, "moved": moved, "sync": rag_core.sync_status()["state"]}
 
 
 @app.get("/api/health")

@@ -63,9 +63,9 @@ class FakeHfApi:
     def create_repo(self, *a, **k):
         return None
 
-    def upload_folder(self, folder_path, path_in_repo, repo_id, repo_type):
+    def upload_folder(self, folder_path, path_in_repo, repo_id, repo_type, **kwargs):
         originals = os.path.join(folder_path, rc.ORIGINALS_DIR)
-        self.uploads.append({"folder": folder_path,
+        self.uploads.append({"folder": folder_path, "kwargs": kwargs,
                              "originals": sorted(os.listdir(originals))
                              if os.path.isdir(originals) else []})
         if self.fail_times > 0:
@@ -121,6 +121,11 @@ def test_every_user_endpoint_requires_sign_in():
         ("DELETE", "/api/notes/x.txt", {}),
         ("POST", "/api/query", {"json": {"question": "hi"}}),
         ("POST", "/api/upload", {"files": {"file": ("a.txt", b"x", "text/plain")}}),
+        ("POST", "/api/notes/x.txt/move", {"json": {"category": None}}),
+        ("GET", "/api/categories", {}),
+        ("POST", "/api/categories", {"json": {"name": "A"}}),
+        ("PUT", "/api/categories/c000000000000", {"json": {"name": "B"}}),
+        ("DELETE", "/api/categories/c000000000000", {}),
     ]
     for method, path, kw in calls:
         r = client.request(method, path, **kw)
@@ -339,6 +344,8 @@ def test_original_is_in_the_folder_when_sync_runs():
         rc.add_image_note("imager", "wave.png", str(img), source="upload/wave.png")
         assert api.uploads, "no sync happened"
         assert "wave.png" in api.uploads[-1]["originals"], api.uploads[-1]
+        # The Dataset must mirror the folder, or deleted categories come back on restart.
+        assert api.uploads[-1]["kwargs"].get("delete_patterns") == "*", api.uploads[-1]
     finally:
         rc.describe_image = original_describe
         reset_sync()
@@ -373,6 +380,8 @@ def test_original_response_varies_by_user():
     reset_sync()
     src = Path(tempfile.mkdtemp()) / "pic.png"
     src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\1" * 32)
+    # An original is served only for a note that exists (it is located by the note's id).
+    rc.add_text_note("viewer", "pic.png", "這是一份【物理】科的筆記。", source="upload/pic.png")
     rc.save_original("viewer", "pic.png", str(src))
     r = client.get("/api/notes/pic.png/original", headers={"X-Dev-User": "viewer"})
     assert r.status_code == 200, r.status_code

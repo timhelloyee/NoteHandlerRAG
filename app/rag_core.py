@@ -10,13 +10,19 @@ Retrieval embedder is intfloat/multilingual-e5-base (繁中+英文皆強，跨�
 import os
 import re
 import io
+import json
+import time
+import uuid
 import shutil
 import base64
+import gc
 import hashlib
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import chromadb
+from chromadb.api.client import SharedSystemClient
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -235,25 +241,192 @@ def _safe_name(user_id: str) -> str:
     return name[:512]
 
 
+# --- categories -----------------------------------------------------------------------
+# A user's notes are grouped into flat, independent categories. Each category is its own
+# folder — its own Chroma store plus its own originals — under the user's folder:
+#
+#   <VECTORSTORE_ROOT>/<user>/                       uncategorized notes (the original store)
+#   <VECTORSTORE_ROOT>/<user>/categories/<id>/       one category
+#       category.json                                {"name": ..., "created": ...}
+#
+# Categories never nest: there is no way to create a category inside another. The folder
+# is named by a stable id, not the display name, so renaming only rewrites category.json
+# and never has to move a folder that Chroma holds open. Asking inside a category opens
+# that one store and nothing else; only a question with no category reads every store.
+CATEGORIES_DIR = "categories"
+CATEGORY_FILE = "category.json"
+CATEGORY_NAME_MAX = 30
+_CATEGORY_ID = re.compile(r"^c[0-9a-f]{12}$")
+_RESERVED_NAMES = {"未分類", "全部", "全部類別"}   # labels the page already uses
+_store_lock = threading.RLock()
+
+
+class CategoryError(ValueError):
+    """A category request the user can fix (bad or duplicate name). Message is shown as-is."""
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+class CategoryNotFoundError(LookupError):
+    """The category id does not exist for this user."""
+
+
+def _user_dir(user_id: str) -> str:
+    return os.path.join(VECTORSTORE_ROOT, _safe_name(user_id))
+
+
+def _store_dir(user_id: str, category: str | None = None) -> str:
+    """Folder holding one store: the uncategorized store when category is None."""
+    if category is None:
+        return _user_dir(user_id)
+    if not isinstance(category, str) or not _CATEGORY_ID.match(category):
+        raise CategoryNotFoundError(category)
+    return os.path.join(_user_dir(user_id), CATEGORIES_DIR, category)
+
+
+def _read_category(user_id: str, category: str) -> dict | None:
+    try:
+        with open(os.path.join(_store_dir(user_id, category), CATEGORY_FILE), encoding="utf-8") as f:
+            meta = json.load(f)
+        return meta if isinstance(meta, dict) and meta.get("name") else None
+    except (OSError, ValueError, CategoryNotFoundError):
+        return None
+
+
+def _require_category(user_id: str, category: str | None) -> None:
+    if category is not None and _read_category(user_id, category) is None:
+        raise CategoryNotFoundError(category)
+
+
 _dim_checked: set[str] = set()
 
 
-def get_user_collection(user_id: str):
+def get_user_collection(user_id: str, category: str | None = None):
+    """The Chroma collection for one store — uncategorized by default, or one category."""
+    _require_category(user_id, category)
     name = _safe_name(user_id)
-    chroma_client = chromadb.PersistentClient(path=f"{VECTORSTORE_ROOT}/{name}")
+    path = _store_dir(user_id, category)
+    chroma_client = chromadb.PersistentClient(path=path)
     col = chroma_client.get_or_create_collection(name)
     # A store embedded by another model has vectors of a different width. Chroma would
     # accept the write and fail later with an opaque dimension error, so say it here,
     # once per collection, in terms of the fix (re-upload the notes).
-    if name not in _dim_checked:
-        _dim_checked.add(name)
+    if path not in _dim_checked:
+        _dim_checked.add(path)
         got = col.peek(1).get("embeddings")
         if got is not None and len(got) and len(got[0]) != EMBED_DIM:
             raise RuntimeError(
-                f"vectorstore '{name}' holds {len(got[0])}-dim vectors but {EMBED_MODEL} "
-                f"produces {EMBED_DIM}. Delete {VECTORSTORE_ROOT}/{name} and re-add the "
+                f"vectorstore '{path}' holds {len(got[0])}-dim vectors but {EMBED_MODEL} "
+                f"produces {EMBED_DIM}. Delete {path} and re-add the "
                 f"notes, or unset EMBED_MODEL.")
     return col
+
+
+def list_categories(user_id: str) -> list[dict]:
+    """The user's categories, oldest first."""
+    base = os.path.join(_user_dir(user_id), CATEGORIES_DIR)
+    if not os.path.isdir(base):
+        return []
+    found = []
+    for entry in os.listdir(base):
+        if not _CATEGORY_ID.match(entry):
+            continue
+        meta = _read_category(user_id, entry)
+        if meta:
+            found.append({"id": entry, "name": meta["name"], "created": meta.get("created", 0)})
+    found.sort(key=lambda c: (c["created"], c["name"]))
+    return [{"id": c["id"], "name": c["name"]} for c in found]
+
+
+def _stores(user_id: str) -> list[str | None]:
+    """Every store of this user: uncategorized first, then each category."""
+    return [None] + [c["id"] for c in list_categories(user_id)]
+
+
+def _clean_category_name(user_id: str, name: str, keep: str | None = None) -> str:
+    name = re.sub(r"\s+", " ", name or "").strip()
+    if not name:
+        raise CategoryError("類別名稱不可為空")
+    if len(name) > CATEGORY_NAME_MAX:
+        raise CategoryError(f"類別名稱最多 {CATEGORY_NAME_MAX} 個字")
+    # A slash would read as a sub-category, which this system deliberately does not have.
+    if re.search(r"[/\\\x00-\x1f]", name):
+        raise CategoryError("類別名稱不可包含 / 或 \\（類別不能有子類別）")
+    if name in _RESERVED_NAMES:
+        raise CategoryError(f"「{name}」是保留名稱，請換一個")
+    if any(c["name"].casefold() == name.casefold() and c["id"] != keep
+           for c in list_categories(user_id)):
+        raise CategoryError(f"已經有名為「{name}」的類別", status=409)
+    return name
+
+
+def _write_category(user_id: str, category: str, meta: dict) -> None:
+    with open(os.path.join(_store_dir(user_id, category), CATEGORY_FILE), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
+
+
+def create_category(user_id: str, name: str) -> dict:
+    require_loaded()
+    with _store_lock:
+        name = _clean_category_name(user_id, name)
+        category = "c" + uuid.uuid4().hex[:12]
+        os.makedirs(_store_dir(user_id, category))
+        _write_category(user_id, category, {"name": name, "created": time.time()})
+    _persist_user(user_id)
+    return {"id": category, "name": name}
+
+
+def rename_category(user_id: str, category: str, name: str) -> dict:
+    require_loaded()
+    with _store_lock:
+        meta = _read_category(user_id, category)
+        if meta is None:
+            raise CategoryNotFoundError(category)
+        meta["name"] = _clean_category_name(user_id, name, keep=category)
+        _write_category(user_id, category, meta)
+    _persist_user(user_id)
+    return {"id": category, "name": meta["name"]}
+
+
+def delete_category(user_id: str, category: str) -> int:
+    """Remove a category. Its notes are moved to uncategorized first, so deleting a
+    category never deletes a note. Returns how many notes were moved."""
+    require_loaded()
+    with _store_lock:
+        _require_category(user_id, category)
+        col = get_user_collection(user_id, category)
+        note_ids = sorted({_base_id(i) for i in col.get()["ids"]})
+        for file_id in note_ids:
+            _transfer_note(user_id, file_id, category, None)
+        del col
+        _dim_checked.discard(_store_dir(user_id, category))
+        _remove_store_folder(_store_dir(user_id, category))
+    _persist_user(user_id)
+    return len(note_ids)
+
+
+def _remove_store_folder(path: str) -> None:
+    """Delete a category folder that Chroma may still hold open.
+
+    Chroma keeps its SQLite file open for as long as a client for that path lives, and
+    Windows refuses to delete an open file (Linux, where the Space runs, does not care).
+    Closing every cached client is safe — the next request simply reopens its store — but
+    the handles are released only once the Python objects are collected, so collect and
+    retry briefly before giving up."""
+    for attempt in range(10):
+        gc.collect()
+        SharedSystemClient.clear_system_cache()
+        gc.collect()
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.2)
 
 
 # --- persistence: sync vectorstores to a private HF Dataset --------------------------
@@ -374,8 +547,13 @@ def _persist_user(user_id: str) -> bool:
     if not os.path.isdir(folder):
         return True
     try:
+        # delete_patterns makes the Dataset mirror the folder. Without it a deleted
+        # category (or a note's original moved to another category) would stay in the
+        # Dataset and be copied back on the next restart. Safe only because writes are
+        # refused unless the folder was fully restored first (require_loaded).
         _hf_api.upload_folder(folder_path=folder, path_in_repo=name,
-                              repo_id=VECTORSTORE_DATASET, repo_type="dataset")
+                              repo_id=VECTORSTORE_DATASET, repo_type="dataset",
+                              delete_patterns="*")
     except Exception as e:
         _unsynced_users.add(name)
         if _sync["state"] != "unavailable":
@@ -400,15 +578,16 @@ def _persist_user(user_id: str) -> bool:
 ORIGINALS_DIR = "originals"
 
 
-def _originals_path(user_id: str, file_id: str = "") -> str:
-    base = os.path.join(VECTORSTORE_ROOT, _safe_name(user_id), ORIGINALS_DIR)
+def _originals_path(user_id: str, file_id: str = "", category: str | None = None) -> str:
+    base = os.path.join(_store_dir(user_id, category), ORIGINALS_DIR)
     return os.path.join(base, os.path.basename(file_id)) if file_id else base
 
 
-def save_original(user_id: str, file_id: str, src_path: str) -> str | None:
-    """Keep the uploaded file alongside the user's vectors. Returns the stored path."""
+def save_original(user_id: str, file_id: str, src_path: str,
+                  category: str | None = None) -> str | None:
+    """Keep the uploaded file alongside the vectors of the store it belongs to."""
     try:
-        folder = _originals_path(user_id)
+        folder = _originals_path(user_id, category=category)
         os.makedirs(folder, exist_ok=True)
         dest = os.path.join(folder, os.path.basename(file_id))
         shutil.copyfile(src_path, dest)
@@ -418,14 +597,20 @@ def save_original(user_id: str, file_id: str, src_path: str) -> str | None:
         return None
 
 
-def get_original(user_id: str, file_id: str) -> str | None:
-    """Path to a note's stored source file, or None if it wasn't kept."""
-    path = _originals_path(user_id, file_id)
+def get_original(user_id: str, file_id: str, category: str | None = None) -> str | None:
+    """Path to a note's stored source file in the given store, or None if it wasn't kept."""
+    path = _originals_path(user_id, file_id, category)
     return path if os.path.isfile(path) else None
 
 
-def _delete_original(user_id: str, file_id: str) -> None:
-    path = _originals_path(user_id, file_id)
+def find_original(user_id: str, file_id: str) -> str | None:
+    """Like get_original, for a caller that does not know which category the note is in."""
+    found, category = _find_note(user_id, file_id)
+    return get_original(user_id, file_id, category) if found else None
+
+
+def _delete_original(user_id: str, file_id: str, category: str | None = None) -> None:
+    path = _originals_path(user_id, file_id, category)
     if os.path.isfile(path):
         try:
             os.remove(path)
@@ -771,21 +956,32 @@ def _note_exists(collection, file_id: str) -> bool:
     return bool(collection.get(ids=[file_id, f"{file_id}#0"])["ids"])
 
 
+def _find_note(user_id: str, file_id: str) -> tuple[bool, str | None]:
+    """(found, category) for a note id. Ids are unique across all of a user's categories,
+    so managing a note — open, edit, move, delete — needs only its id. This looks in
+    every store; answering a question never goes through here."""
+    for category in _stores(user_id):
+        if _note_exists(get_user_collection(user_id, category), file_id):
+            return True, category
+    return False, None
+
+
 def _add_note(user_id: str, file_id: str, text: str, kind: str, source: str,
               structured: bool = False, merge_target: int = 0,
-              chunks: list[str] | None = None) -> bool:
-    """Chunk, embed, and store one note (one vector per chunk).
+              chunks: list[str] | None = None, category: str | None = None) -> bool:
+    """Chunk, embed, and store one note (one vector per chunk) in the given category.
 
-    Returns True if added, False if it already existed. Pre-chunking data (one whole
-    document under the bare id) coexists fine: _base_id/list/delete handle both shapes.
+    Returns True if added, False if a note with this id already exists in ANY category.
+    Pre-chunking data (one whole document under the bare id) coexists fine:
+    _base_id/list/delete handle both shapes.
 
     `chunks` lets a caller supply its own chunking and reuse the embed/store path — the
     eval harness needs it to build control conditions (e.g. the same chunks with their
     ancestor prefixes removed) without that logic living here.
     """
     require_loaded()
-    collection = get_user_collection(user_id)
-    if _note_exists(collection, file_id):
+    collection = get_user_collection(user_id, category)
+    if _find_note(user_id, file_id)[0]:
         return False
     if chunks is None:
         chunks = (chunk_by_structure(text, merge_target=merge_target) if structured
@@ -808,13 +1004,14 @@ def _add_note(user_id: str, file_id: str, text: str, kind: str, source: str,
     return True
 
 
-def add_text_note(user_id: str, file_id: str, content: str, source: str) -> bool:
+def add_text_note(user_id: str, file_id: str, content: str, source: str,
+                  category: str | None = None) -> bool:
     """Returns True if added, False if it already existed."""
-    return _add_note(user_id, file_id, content, "text", source)
+    return _add_note(user_id, file_id, content, "text", source, category=category)
 
 
 def _add_described_note(user_id: str, file_id: str, src_path: str, description: str,
-                        kind: str, source: str) -> None:
+                        kind: str, source: str, category: str | None = None) -> None:
     """Store a Gemini description together with the file it came from.
 
     The original is written BEFORE _add_note runs, because _add_note is what syncs the
@@ -824,43 +1021,43 @@ def _add_described_note(user_id: str, file_id: str, src_path: str, description: 
     """
     if not description:
         return
-    save_original(user_id, file_id, src_path)
+    save_original(user_id, file_id, src_path, category)
     try:
-        added = _add_note(user_id, file_id, description, kind, source)
+        added = _add_note(user_id, file_id, description, kind, source, category=category)
     except Exception:
-        _delete_original(user_id, file_id)
+        _delete_original(user_id, file_id, category)
         raise
     if not added:
-        _delete_original(user_id, file_id)
+        _delete_original(user_id, file_id, category)
 
 
 def add_image_note(user_id: str, file_id: str, image_path: str, source: str,
-                   model: str | None = None) -> str:
+                   model: str | None = None, category: str | None = None) -> str:
     """Describes the image with Gemini, embeds the description, stores it with the image.
 
     Returns the generated description (or "" if the note already existed).
     """
     require_loaded()   # before the Gemini call: no point spending quota on a refused write
-    collection = get_user_collection(user_id)
-    if _note_exists(collection, file_id):
+    _require_category(user_id, category)
+    if _find_note(user_id, file_id)[0]:
         return ""
     description = describe_image(image_path, model=model)
-    _add_described_note(user_id, file_id, image_path, description, "image", source)
+    _add_described_note(user_id, file_id, image_path, description, "image", source, category)
     return description
 
 
 def add_pdf_note(user_id: str, file_id: str, pdf_path: str, source: str,
-                 model: str | None = None) -> str:
+                 model: str | None = None, category: str | None = None) -> str:
     """Describes the PDF with Gemini, embeds the description, stores it with the PDF.
 
     Returns the generated description (or "" if the note already existed).
     """
     require_loaded()
-    collection = get_user_collection(user_id)
-    if _note_exists(collection, file_id):
+    _require_category(user_id, category)
+    if _find_note(user_id, file_id)[0]:
         return ""
     description = describe_pdf(pdf_path, model=model)
-    _add_described_note(user_id, file_id, pdf_path, description, "pdf", source)
+    _add_described_note(user_id, file_id, pdf_path, description, "pdf", source, category)
     return description
 
 
@@ -886,8 +1083,10 @@ def _join_chunks(rows: list[tuple[str, dict]]) -> str:
 
 def get_note_text(user_id: str, file_id: str) -> str | None:
     """Full stored text of a note (None if it doesn't exist)."""
-    collection = get_user_collection(user_id)
-    got = collection.get(include=["documents", "metadatas"])
+    found, category = _find_note(user_id, file_id)
+    if not found:
+        return None
+    got = get_user_collection(user_id, category).get(include=["documents", "metadatas"])
     rows = [(d, m) for i, d, m in zip(got["ids"], got["documents"], got["metadatas"])
             if _base_id(i) == file_id]
     return _join_chunks(rows) if rows else None
@@ -895,55 +1094,100 @@ def get_note_text(user_id: str, file_id: str) -> str | None:
 
 def update_note(user_id: str, file_id: str, new_text: str) -> bool:
     """Replace a note's text with a user-corrected version: re-chunk and re-embed, keeping
-    its type and source. No Gemini call — the description was already generated; this is
-    the human fixing what the model misread. False if the note doesn't exist.
+    its type, source and category. No Gemini call — the description was already generated;
+    this is the human fixing what the model misread. False if the note doesn't exist.
     """
     require_loaded()   # checked before the delete below, not just inside _add_note
-    collection = get_user_collection(user_id)
+    found, category = _find_note(user_id, file_id)
+    if not found:
+        return False
+    collection = get_user_collection(user_id, category)
     got = collection.get(include=["metadatas"])
     ids = [i for i in got["ids"] if _base_id(i) == file_id]
-    if not ids:
-        return False
     meta = next((m for i, m in zip(got["ids"], got["metadatas"])
                  if _base_id(i) == file_id), {}) or {}
     collection.delete(ids=ids)
     return _add_note(user_id, file_id, new_text,
-                     meta.get("type", "text"), meta.get("source", file_id))
+                     meta.get("type", "text"), meta.get("source", file_id), category=category)
+
+
+def _transfer_note(user_id: str, file_id: str, src: str | None, dst: str | None) -> None:
+    """Move a note's chunks and original from one store to another. The stored vectors are
+    copied as they are, so moving costs no embedding and no Gemini call."""
+    source = get_user_collection(user_id, src)
+    got = source.get(include=["embeddings", "documents", "metadatas"])
+    rows = [k for k, i in enumerate(got["ids"]) if _base_id(i) == file_id]
+    if not rows:
+        return
+    embeddings = got["embeddings"]
+    get_user_collection(user_id, dst).add(
+        ids=[got["ids"][k] for k in rows],
+        embeddings=[[float(x) for x in embeddings[k]] for k in rows],
+        documents=[got["documents"][k] for k in rows],
+        metadatas=[got["metadatas"][k] for k in rows],
+    )
+    # Added to the destination before removing from the source: a failure in between
+    # leaves a duplicate the user can see, never a note that is gone.
+    source.delete(ids=[got["ids"][k] for k in rows])
+    original = get_original(user_id, file_id, src)
+    if original:
+        folder = _originals_path(user_id, category=dst)
+        os.makedirs(folder, exist_ok=True)
+        shutil.move(original, os.path.join(folder, os.path.basename(file_id)))
+
+
+def move_note(user_id: str, file_id: str, category: str | None) -> bool:
+    """Put a note into a category (None = uncategorized). False if the note doesn't exist."""
+    require_loaded()
+    with _store_lock:
+        _require_category(user_id, category)
+        found, current = _find_note(user_id, file_id)
+        if not found:
+            return False
+        if current == category:
+            return True
+        _transfer_note(user_id, file_id, current, category)
+    _persist_user(user_id)
+    return True
 
 
 def list_notes(user_id: str) -> list[dict]:
-    """One entry per note, aggregating chunked notes (preview = first chunk)."""
-    collection = get_user_collection(user_id)
-    results = collection.get(include=["documents", "metadatas"])
-    notes: dict[str, dict] = {}
-    for id_, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
-        meta = meta or {}
-        base = _base_id(id_)
-        entry = notes.setdefault(base, {
-            "id": base, "type": meta.get("type"), "source": meta.get("source"),
-            "preview": "", "_chunks": int(meta.get("n_chunks") or 1),
-        })
-        if meta.get("chunk", 0) == 0:  # whole-doc notes have no 'chunk' key -> 0
-            doc = doc or ""
-            truncated = len(doc) > 240 or entry["_chunks"] > 1
-            entry["preview"] = doc[:240] + ("…" if truncated else "")
-    # has_original tells the editor whether to draw the side-by-side original pane.
-    # Reported here rather than letting the UI probe /original per note, which would
-    # cost a 404 round trip for every text note (they never have one) and log noise.
-    for base, entry in notes.items():
-        entry["has_original"] = get_original(user_id, base) is not None
-    return [{k: v for k, v in e.items() if not k.startswith("_")} for e in notes.values()]
+    """One entry per note across every category, aggregating chunked notes
+    (preview = first chunk). `category` is the category id, or None for uncategorized."""
+    out: list[dict] = []
+    for category in _stores(user_id):
+        results = get_user_collection(user_id, category).get(include=["documents", "metadatas"])
+        notes: dict[str, dict] = {}
+        for id_, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+            meta = meta or {}
+            base = _base_id(id_)
+            entry = notes.setdefault(base, {
+                "id": base, "type": meta.get("type"), "source": meta.get("source"),
+                "category": category, "preview": "", "_chunks": int(meta.get("n_chunks") or 1),
+            })
+            if meta.get("chunk", 0) == 0:  # whole-doc notes have no 'chunk' key -> 0
+                doc = doc or ""
+                truncated = len(doc) > 240 or entry["_chunks"] > 1
+                entry["preview"] = doc[:240] + ("…" if truncated else "")
+        # has_original tells the editor whether to draw the side-by-side original pane.
+        # Reported here rather than letting the UI probe /original per note, which would
+        # cost a 404 round trip for every text note (they never have one) and log noise.
+        for base, entry in notes.items():
+            entry["has_original"] = get_original(user_id, base, category) is not None
+        out.extend({k: v for k, v in e.items() if not k.startswith("_")} for e in notes.values())
+    return out
 
 
 def delete_note(user_id: str, file_id: str) -> bool:
     """Deletes a note and all its chunks. Returns False if it wasn't found."""
     require_loaded()
-    collection = get_user_collection(user_id)
-    ids = [i for i in collection.get()["ids"] if _base_id(i) == file_id]
-    if not ids:
+    found, category = _find_note(user_id, file_id)
+    if not found:
         return False
+    collection = get_user_collection(user_id, category)
+    ids = [i for i in collection.get()["ids"] if _base_id(i) == file_id]
     collection.delete(ids=ids)
-    _delete_original(user_id, file_id)
+    _delete_original(user_id, file_id, category)
     _persist_user(user_id)
     return True
 
@@ -1023,23 +1267,33 @@ def _effective_distance(dist: float, meta: dict, question: str) -> float:
     return dist - min(hits, KEYWORD_BONUS_CAP) * KEYWORD_BONUS
 
 
-def _retrieve(user_id: str, question: str, top_k: int = 10) -> list[str]:
-    """Top-k chunks for a question, keyword-boosted and distance-filtered."""
-    collection = get_user_collection(user_id)
+def _retrieve(user_id: str, question: str, top_k: int = 10,
+              stores: list[str | None] | None = None) -> list[str]:
+    """Top-k chunks for a question, keyword-boosted and distance-filtered.
+
+    `stores` limits the search to those categories (None in the list = uncategorized).
+    Left as None it searches every store — only for a question asked with no category."""
+    if stores is None:
+        stores = _stores(user_id)
     q_embedding = embed_query(question)
-    results = collection.query(
-        query_embeddings=[q_embedding], n_results=top_k,
-        include=["documents", "distances", "metadatas"],
-    )
-    docs = results["documents"][0] if results["documents"] else []
-    if not docs:
+    pooled: list[tuple[str, float]] = []
+    for store in stores:
+        collection = get_user_collection(user_id, store)
+        if collection.count() == 0:
+            continue
+        results = collection.query(
+            query_embeddings=[q_embedding], n_results=top_k,
+            include=["documents", "distances", "metadatas"],
+        )
+        docs = results["documents"][0] if results["documents"] else []
+        dists = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
+        metas = (results.get("metadatas") or [[]])[0] or [{}] * len(docs)
+        pooled.extend(zip(docs, (_effective_distance(d, m, question)
+                                 for d, m in zip(dists, metas))))
+    if not pooled:
         return []
-    dists = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
-    metas = (results.get("metadatas") or [[]])[0] or [{}] * len(docs)
-    scored = sorted(
-        zip(docs, (_effective_distance(d, m, question) for d, m in zip(dists, metas))),
-        key=lambda x: x[1],
-    )
+    # Every store uses the same embedder, so distances are comparable across them.
+    scored = sorted(pooled, key=lambda x: x[1])[:top_k]
     best = scored[0][1]
     if best > RELEVANCE_CEILING:
         return [scored[0][0]]  # nothing on topic — one chunk is context enough to refuse
@@ -1058,9 +1312,10 @@ def _retrieve(user_id: str, question: str, top_k: int = 10) -> list[str]:
 WHOLE_CORPUS_CHARS = int(os.environ.get("WHOLE_CORPUS_CHARS", 60_000))
 
 
-def _whole_corpus(collection) -> list[str] | None:
+def _whole_corpus(collections) -> list[str] | None:
     """One entry per note — chunks rejoined, overlaps removed — or None when the corpus
-    is too big to send whole.
+    is too big to send whole. Takes one collection or a list of them (one per category
+    being asked); the size limit applies to what would actually be sent.
 
     Deliberately *not* the raw chunk list: chunks overlap by CHUNK_OVERLAP, so feeding
     them verbatim would repeat text at every seam and split each note across arbitrary
@@ -1069,25 +1324,37 @@ def _whole_corpus(collection) -> list[str] | None:
     """
     if WHOLE_CORPUS_CHARS <= 0:
         return None
-    got = collection.get(include=["documents", "metadatas"])
-    docs = got["documents"] or []
-    if not docs or sum(len(d or "") for d in docs) > WHOLE_CORPUS_CHARS:
-        return None
-    metas = got["metadatas"] or [{}] * len(docs)
+    if not isinstance(collections, (list, tuple)):
+        collections = [collections]
     by_note: dict[str, list[tuple[str, dict]]] = {}
-    for id_, doc, meta in zip(got["ids"], docs, metas):
-        by_note.setdefault(_base_id(id_), []).append((doc, meta or {}))
+    total = 0
+    for collection in collections:
+        got = collection.get(include=["documents", "metadatas"])
+        docs = got["documents"] or []
+        metas = got["metadatas"] or [{}] * len(docs)
+        total += sum(len(d or "") for d in docs)
+        for id_, doc, meta in zip(got["ids"], docs, metas):
+            by_note.setdefault(_base_id(id_), []).append((doc, meta or {}))
+    if not by_note or total > WHOLE_CORPUS_CHARS:
+        return None
     return [text for _, rows in sorted(by_note.items())
             if (text := _join_chunks(rows))]
 
 
-def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = None) -> str:
+def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = None,
+              category: str | None = None) -> str:
+    """Answer from one category's notes, or from every category when none is chosen.
+
+    With a category, only that category's folder is opened: notes in other categories
+    are never read, retrieved or sent to the model."""
     # An unloaded store would answer every question with 「沒有記載相關訊息」, which reads
     # as a statement about the user's notes rather than about the server.
     require_loaded()
-    docs = _whole_corpus(get_user_collection(user_id))
+    _require_category(user_id, category)
+    stores = [category] if category is not None else _stores(user_id)
+    docs = _whole_corpus([get_user_collection(user_id, s) for s in stores])
     if docs is None:
-        docs = _retrieve(user_id, question, top_k)
+        docs = _retrieve(user_id, question, top_k, stores=stores)
     if not docs:
         return "參考資料中沒有記載相關訊息"
     context = "\n---\n".join(docs)

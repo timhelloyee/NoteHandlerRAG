@@ -131,7 +131,7 @@
     }
     #notes li:last-child { border-bottom: 0; }
     #notes li.muted { border-bottom: 0; justify-content: flex-start; }
-    #notes .meta { word-break: break-word; font-size: .9rem; }
+    #notes .meta { word-break: break-word; font-size: .9rem; flex: 1; min-width: 12rem; }
     button.del {
       margin-top: 0; padding: .35rem .75rem; font-size: .8rem; flex: none;
       background: #fff; color: var(--danger); border: 1px solid #f1c4c4; box-shadow: none;
@@ -197,6 +197,34 @@
       font-size: .85rem; line-height: 1.6; max-height: 340px; overflow: auto;
     }
     .full :first-child { margin-top: 0; }
+
+    /* Categories: one group per category, each a drop target for dragged notes. */
+    .cat-add { display: flex; gap: .5rem; align-items: center; margin: .2rem 0 1rem; }
+    .cat-add input[type=text] { flex: 1; }
+    .cat-add button { margin-top: 0; white-space: nowrap; }
+    .cat-group {
+      border: 1px solid var(--border); border-radius: 10px; padding: .55rem .8rem;
+      margin-bottom: .75rem; transition: border-color .12s, background .12s;
+    }
+    .cat-group.drop { border-color: var(--accent); background: #eef2ff; }
+    .cat-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+    .cat-name { font-weight: 700; }
+    .cat-group.none .cat-name { color: var(--muted); font-weight: 600; }
+    .cat-count {
+      font-size: .75rem; color: var(--muted); background: #f1f3f9;
+      border-radius: 999px; padding: 0 .5rem;
+    }
+    .cat-tools { margin-left: auto; display: flex; gap: .3rem; }
+    .cat-tools .danger { color: var(--danger); }
+    .cat-notes { margin-top: .2rem; }
+    .cat-notes .empty { color: var(--muted); font-size: .85rem; padding: .5rem .2rem; border-bottom: 0; }
+    .grip {
+      cursor: grab; color: var(--muted); padding: 0 .35rem 0 0; user-select: none;
+      font-size: 1rem; line-height: 1;
+    }
+    .grip[draggable=false] { cursor: default; opacity: .4; }
+    #notes li.dragging { opacity: .45; }
+    select.move { padding: .25rem .4rem; font-size: .8rem; border-radius: 8px; }
     @media (max-width: 720px) {
       .editor.split { grid-template-columns: 1fr; }
       .editor textarea { min-height: 260px; }
@@ -236,6 +264,11 @@
     <label for="question">問問題</label>
     <textarea id="question" placeholder="輸入問題，例如：輸出每一個科目統整後的筆記內容"></textarea>
     <div class="model-row">
+      <label for="askCategory">問題範圍</label>
+      <select id="askCategory"><option value="">全部類別</option></select>
+    </div>
+    <p class="muted" id="askScopeHint">未選擇類別時，會在所有筆記中尋找答案。</p>
+    <div class="model-row">
       <label for="model">AI 模型</label>
       <select id="model"></select>
     </div>
@@ -245,14 +278,22 @@
   </section>
 
   <section>
-    <label>已儲存的筆記</label>
-    <p class="muted">只會顯示你登入的 Google 帳號所儲存的筆記。</p>
-    <ul id="notes"></ul>
+    <label>筆記分類</label>
+    <p class="muted">只會顯示你登入的 Google 帳號所儲存的筆記。按住筆記左邊的 ⠿ 拖到其他類別即可移動；手機上可用「移到」選單。</p>
+    <div class="cat-add">
+      <input type="text" id="newCategory" maxlength="30" placeholder="新類別名稱，例如：生物">
+      <button id="addCategoryBtn">新增類別</button>
+    </div>
+    <div id="notes"></div>
     <button id="refreshBtn">重新整理</button>
 
     <hr class="divider">
     <label for="file">上傳筆記 (.txt / .md / 圖片 / PDF)</label>
     <input type="file" id="file" accept=".txt,.md,.jpg,.jpeg,.png,.webp,.gif,.pdf">
+    <div class="model-row">
+      <label for="uploadCategory">放入類別</label>
+      <select id="uploadCategory"><option value="">未分類</option></select>
+    </div>
     <div><button id="uploadBtn">上傳</button></div>
     <div id="uploadResult" class="muted"></div>
   </section>
@@ -313,8 +354,11 @@
       const state = sync && sync.state;
       writable = !sync || sync.writable !== false;
       $("uploadBtn").disabled = !writable;
-      document.querySelectorAll("#notes button.edit, #notes button.del, .editor .save")
+      $("addCategoryBtn").disabled = !writable;
+      document.querySelectorAll(
+        "#notes button.edit, #notes button.del, #notes .cat-tools button, #notes select.move, .editor .save")
         .forEach(x => { x.disabled = !writable; });
+      document.querySelectorAll("#notes .grip").forEach(g => { g.draggable = writable; });
       if (state === "unavailable") {
         b.className = "banner error";
         b.textContent = "無法載入你的雲端筆記庫：" + (sync.message || "原因不明")
@@ -448,7 +492,10 @@
         const res = await api("/api/query", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question, top_k: 10, model: $("model").value }),
+          // No category means every category is searched; a chosen one is the only
+          // folder the server opens.
+          body: JSON.stringify({ question, top_k: 10, model: $("model").value,
+                                 category: $("askCategory").value || null }),
         });
         const data = await res.json();
         if (res.ok) { renderRich($("answer"), data.answer); }
@@ -469,6 +516,7 @@
       const fd = new FormData();
       fd.append("file", file);
       fd.append("model", $("model").value);
+      fd.append("category", $("uploadCategory").value);
       try {
         const res = await api("/api/upload", { method: "POST", body: fd });
         const data = await res.json();
@@ -520,119 +568,318 @@
       return name;
     }
 
+    // --- Categories --------------------------------------------------------------
+    // Categories are flat and independent: each is its own folder on the server. The
+    // list below shows one group per category (plus 未分類), and every group is a drop
+    // target, so filing a note is a drag from one group to another.
+    let categories = [];
+
+    const showMessage = (el, text) => {
+      el.innerHTML = "";
+      el.appendChild(Object.assign(document.createElement("p"), { className: "muted", textContent: text }));
+    };
+
+    // Keep the two category pickers in step with the category list, holding on to the
+    // current choice when it still exists.
+    function fillCategorySelects() {
+      const fill = (sel, firstLabel, remember) => {
+        const keep = remember ? (localStorage.getItem(remember) || "") : sel.value;
+        sel.innerHTML = "";
+        sel.appendChild(new Option(firstLabel, ""));
+        for (const c of categories) sel.appendChild(new Option(c.name, c.id));
+        sel.value = categories.some(c => c.id === keep) ? keep : "";
+      };
+      fill($("askCategory"), "全部類別", "nh_ask_category");
+      fill($("uploadCategory"), "未分類", null);
+      updateScopeHint();
+    }
+
+    function updateScopeHint() {
+      const c = categories.find(x => x.id === $("askCategory").value);
+      $("askScopeHint").textContent = c
+        ? `只會在「${c.name}」這個類別的筆記中尋找答案，不會讀取其他類別。`
+        : "未選擇類別時，會在所有筆記中尋找答案。";
+    }
+
+    $("askCategory").addEventListener("change", () => {
+      localStorage.setItem("nh_ask_category", $("askCategory").value);
+      updateScopeHint();
+    });
+
+    async function jsonOrThrow(res) {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(errText(data, res));
+      return data;
+    }
+
+    async function addCategory() {
+      const input = $("newCategory");
+      const name = input.value.trim();
+      if (!name) { input.focus(); return; }
+      if (!userId()) { alert("請先使用 Google 登入。"); return; }
+      $("addCategoryBtn").disabled = true;
+      try {
+        await jsonOrThrow(await api("/api/categories", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        }));
+        input.value = "";
+        await loadNotes();
+      } catch (e) {
+        alert("新增類別失敗：" + e.message);
+      } finally {
+        $("addCategoryBtn").disabled = !writable;
+        checkSync();
+      }
+    }
+
+    async function renameCategory(c) {
+      const name = prompt("新的類別名稱", c.name);
+      if (name === null || name.trim() === "" || name.trim() === c.name) return;
+      try {
+        await jsonOrThrow(await api("/api/categories/" + encodeURIComponent(c.id), {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        }));
+        await loadNotes();
+      } catch (e) {
+        alert("重新命名失敗：" + e.message);
+      } finally {
+        checkSync();
+      }
+    }
+
+    async function deleteCategory(c, count) {
+      const what = count
+        ? `其中的 ${count} 筆筆記會移到「未分類」，筆記本身不會被刪除。`
+        : "這個類別目前沒有筆記。";
+      if (!confirm(`確定要刪除類別「${c.name}」嗎？\n${what}`)) return;
+      try {
+        await jsonOrThrow(await api("/api/categories/" + encodeURIComponent(c.id), { method: "DELETE" }));
+        await loadNotes();
+      } catch (e) {
+        alert("刪除類別失敗：" + e.message);
+      } finally {
+        checkSync();
+      }
+    }
+
+    async function moveNote(id, category) {
+      try {
+        await jsonOrThrow(await api("/api/notes/" + encodeURIComponent(id) + "/move", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ category: category || null }),
+        }));
+      } catch (e) {
+        alert("移動失敗：" + e.message);
+      } finally {
+        await loadNotes();
+        checkSync();
+      }
+    }
+
+    // A group of notes that accepts drops. `c` is null for 未分類.
+    function categoryGroup(c, notes) {
+      const group = document.createElement("div");
+      group.className = "cat-group" + (c ? "" : " none");
+      const head = document.createElement("div");
+      head.className = "cat-head";
+      head.appendChild(Object.assign(document.createElement("span"),
+        { className: "cat-name", textContent: c ? c.name : "未分類" }));
+      head.appendChild(Object.assign(document.createElement("span"),
+        { className: "cat-count", textContent: notes.length + " 筆" }));
+      if (c) {
+        const tools = document.createElement("span");
+        tools.className = "cat-tools";
+        const rename = Object.assign(document.createElement("button"),
+          { className: "toggle", textContent: "重新命名", disabled: !writable });
+        rename.addEventListener("click", () => renameCategory(c));
+        const del = Object.assign(document.createElement("button"),
+          { className: "toggle danger", textContent: "刪除類別", disabled: !writable });
+        del.addEventListener("click", () => deleteCategory(c, notes.length));
+        tools.appendChild(rename);
+        tools.appendChild(del);
+        head.appendChild(tools);
+      }
+      group.appendChild(head);
+
+      const ul = document.createElement("ul");
+      ul.className = "cat-notes";
+      if (notes.length === 0) {
+        ul.appendChild(Object.assign(document.createElement("li"), {
+          className: "empty",
+          textContent: c ? "把筆記拖到這裡" : "拖到這裡可取消分類",
+        }));
+      }
+      for (const n of notes) ul.appendChild(noteRow(n));
+      group.appendChild(ul);
+
+      // Drop target. The note id travels in dataTransfer; dropping onto the group it
+      // already belongs to does nothing.
+      const target = c ? c.id : "";
+      group.addEventListener("dragover", (ev) => {
+        if (!writable || !ev.dataTransfer.types.includes("text/x-note-id")) return;
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = "move";
+        group.classList.add("drop");
+      });
+      group.addEventListener("dragleave", (ev) => {
+        if (!group.contains(ev.relatedTarget)) group.classList.remove("drop");
+      });
+      group.addEventListener("drop", (ev) => {
+        ev.preventDefault();
+        group.classList.remove("drop");
+        const id = ev.dataTransfer.getData("text/x-note-id");
+        const from = ev.dataTransfer.getData("text/x-note-category");
+        if (id && from !== target) moveNote(id, target);
+      });
+      return group;
+    }
+
     async function loadNotes() {
       noteTextCache.clear();
-      const ul = $("notes");
+      const box = $("notes");
       // Open editors hold blob: URLs for their originals; release them before the rows
       // they belong to are thrown away, or each one keeps a whole PDF in memory.
-      ul.querySelectorAll(".editor").forEach(e => e._release && e._release());
+      box.querySelectorAll(".editor").forEach(e => e._release && e._release());
       if (!userId()) {
-        ul.innerHTML = "<li class='muted'>請先使用 Google 登入</li>";
+        categories = [];
+        fillCategorySelects();
+        showMessage(box, "請先使用 Google 登入");
         return;
       }
       let notes;
       try {
-        const res = await api("/api/notes");
-        notes = await res.json();
-        if (!res.ok) {
-          ul.innerHTML = "";
-          ul.appendChild(Object.assign(document.createElement("li"),
-            { className: "muted", textContent: "載入筆記失敗：" + errText(notes, res) }));
+        const [resN, resC] = await Promise.all([api("/api/notes"), api("/api/categories")]);
+        notes = await resN.json();
+        const cats = await resC.json();
+        if (!resN.ok) { showMessage(box, "載入筆記失敗：" + errText(notes, resN)); return; }
+        if (!resC.ok) { showMessage(box, "載入類別失敗：" + errText(cats, resC)); return; }
+        categories = Array.isArray(cats) ? cats : [];
+      } catch (e) {
+        showMessage(box, "載入筆記失敗，請稍後重試");
+        return;
+      }
+      fillCategorySelects();
+      box.innerHTML = "";
+      if (!Array.isArray(notes)) notes = [];
+      if (notes.length === 0 && categories.length === 0) {
+        // Not "no notes" when the store never loaded — that was the misleading message.
+        showMessage(box, writable ? "（尚無筆記）"
+          : "雲端筆記庫目前無法載入，所以這裡暫時看不到你的筆記。");
+        return;
+      }
+      for (const c of categories) {
+        box.appendChild(categoryGroup(c, notes.filter(n => n.category === c.id)));
+      }
+      const known = new Set(categories.map(c => c.id));
+      box.appendChild(categoryGroup(null, notes.filter(n => !known.has(n.category))));
+    }
+
+    // One note row: drag handle, name and preview, actions.
+    function noteRow(n) {
+      const li = document.createElement("li");
+      // The handle, not the whole row, is draggable: a draggable row would swallow text
+      // selection inside an open editor.
+      const grip = Object.assign(document.createElement("span"),
+        { className: "grip", textContent: "⠿", title: "拖曳到其他類別", draggable: writable });
+      grip.addEventListener("dragstart", (ev) => {
+        ev.dataTransfer.setData("text/x-note-id", n.id);
+        ev.dataTransfer.setData("text/x-note-category", n.category || "");
+        ev.dataTransfer.effectAllowed = "move";
+        ev.dataTransfer.setDragImage(li, 12, 12);
+        li.classList.add("dragging");
+      });
+      grip.addEventListener("dragend", () => li.classList.remove("dragging"));
+      li.appendChild(grip);
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      const tag = document.createElement("span");
+      tag.textContent = `[${n.type}] ${n.id} — `;
+      const preview = document.createElement("span");
+      renderInline(preview, n.preview);
+      meta.appendChild(tag);
+      meta.appendChild(preview);
+      const actions = document.createElement("div");
+      actions.className = "note-actions";
+      const edit = document.createElement("button");
+      edit.className = "edit";
+      edit.disabled = !writable;
+      edit.textContent = "編輯";
+      edit.addEventListener("click", () => openEditor(li, n.id, n.has_original, n.type));
+      // The list preview is capped at 240 chars server-side, so a 23-page PDF showed
+      // almost nothing of what was actually stored. This expands the whole thing in
+      // place, without making the user open the editor to read their own note.
+      const more = document.createElement("button");
+      more.className = "toggle";
+      more.textContent = "展開更多";
+      let fullBox = null;
+      more.addEventListener("click", async () => {
+        if (fullBox) {                       // already fetched — just toggle
+          const showing = !fullBox.hidden;
+          fullBox.hidden = showing;
+          more.textContent = showing ? "展開更多" : "顯示較少";
           return;
         }
-      } catch (e) {
-        ul.innerHTML = "<li class='muted'>載入筆記失敗，請稍後重試</li>";
-        return;
-      }
-      ul.innerHTML = "";
-      if (!Array.isArray(notes) || notes.length === 0) {
-        // Not "no notes" when the store never loaded — that was the misleading message.
-        ul.innerHTML = writable
-          ? "<li class='muted'>（尚無筆記）</li>"
-          : "<li class='muted'>雲端筆記庫目前無法載入，所以這裡暫時看不到你的筆記。</li>";
-        return;
-      }
-      for (const n of notes) {
-        const li = document.createElement("li");
-        const meta = document.createElement("span");
-        meta.className = "meta";
-        const tag = document.createElement("span");
-        tag.textContent = `[${n.type}] ${n.id} — `;
-        const preview = document.createElement("span");
-        renderInline(preview, n.preview);
-        meta.appendChild(tag);
-        meta.appendChild(preview);
-        const actions = document.createElement("div");
-        actions.className = "note-actions";
-        const edit = document.createElement("button");
-        edit.className = "edit";
-        edit.disabled = !writable;
-        edit.textContent = "編輯";
-        edit.addEventListener("click", () => openEditor(li, n.id, n.has_original, n.type));
-        // The list preview is capped at 240 chars server-side, so a 23-page PDF showed
-        // almost nothing of what was actually stored. This expands the whole thing in
-        // place, without making the user open the editor to read their own note.
-        const more = document.createElement("button");
-        more.className = "toggle";
-        more.textContent = "展開更多";
-        let fullBox = null;
-        more.addEventListener("click", async () => {
-          if (fullBox) {                       // already fetched — just toggle
-            const showing = !fullBox.hidden;
-            fullBox.hidden = showing;
-            more.textContent = showing ? "展開更多" : "顯示較少";
-            return;
-          }
-          more.disabled = true;
-          more.textContent = "載入中…";
-          try {
-            const text = await fetchNoteText(n.id);
-            fullBox = document.createElement("div");
-            fullBox.className = "full";
-            renderRich(fullBox, text);
-            li.appendChild(fullBox);
-            more.textContent = "顯示較少";
-          } catch (e) {
-            more.textContent = "展開更多";
-            alert("載入完整內容失敗：" + e.message);
-          } finally {
-            more.disabled = false;
-          }
-        });
+        more.disabled = true;
+        more.textContent = "載入中…";
+        try {
+          const text = await fetchNoteText(n.id);
+          fullBox = document.createElement("div");
+          fullBox.className = "full";
+          renderRich(fullBox, text);
+          li.appendChild(fullBox);
+          more.textContent = "顯示較少";
+        } catch (e) {
+          more.textContent = "展開更多";
+          alert("載入完整內容失敗：" + e.message);
+        } finally {
+          more.disabled = false;
+        }
+      });
 
-        // Save the note as a .md file the user can keep, open in any editor, or hand to
-        // another tool. The stored text is fetched rather than the 240-char preview.
-        const dl = document.createElement("button");
-        dl.className = "toggle";
-        dl.textContent = "儲存 .md";
-        dl.addEventListener("click", async () => {
-          const label = dl.textContent;
-          dl.disabled = true;
-          dl.textContent = "準備中…";
-          try {
-            downloadMarkdown(n.id, await fetchNoteText(n.id));
-            dl.textContent = "已儲存";
-            setTimeout(() => { dl.textContent = label; }, 1500);
-          } catch (e) {
-            dl.textContent = label;
-            alert("儲存失敗：" + e.message);
-          } finally {
-            dl.disabled = false;
-          }
-        });
-        const del = document.createElement("button");
-        del.className = "del";
-        del.disabled = !writable;
-        del.textContent = "刪除";
-        del.addEventListener("click", () => deleteNote(n.id));
-        actions.appendChild(more);
-        actions.appendChild(dl);
-        actions.appendChild(edit);
-        actions.appendChild(del);
-        li.appendChild(meta);
-        li.appendChild(actions);
-        ul.appendChild(li);
-      }
+      // Save the note as a .md file the user can keep, open in any editor, or hand to
+      // another tool. The stored text is fetched rather than the 240-char preview.
+      const dl = document.createElement("button");
+      dl.className = "toggle";
+      dl.textContent = "儲存 .md";
+      dl.addEventListener("click", async () => {
+        const label = dl.textContent;
+        dl.disabled = true;
+        dl.textContent = "準備中…";
+        try {
+          downloadMarkdown(n.id, await fetchNoteText(n.id));
+          dl.textContent = "已儲存";
+          setTimeout(() => { dl.textContent = label; }, 1500);
+        } catch (e) {
+          dl.textContent = label;
+          alert("儲存失敗：" + e.message);
+        } finally {
+          dl.disabled = false;
+        }
+      });
+      const del = document.createElement("button");
+      del.className = "del";
+      del.disabled = !writable;
+      del.textContent = "刪除";
+      del.addEventListener("click", () => deleteNote(n.id));
+      // Same move as dragging, for touch screens where HTML drag and drop does not work.
+      const move = document.createElement("select");
+      move.className = "move";
+      move.title = "移到其他類別";
+      move.disabled = !writable;
+      move.appendChild(new Option("未分類", ""));
+      for (const c of categories) move.appendChild(new Option(c.name, c.id));
+      move.value = n.category || "";
+      move.addEventListener("change", () => moveNote(n.id, move.value));
+      actions.appendChild(move);
+      actions.appendChild(more);
+      actions.appendChild(dl);
+      actions.appendChild(edit);
+      actions.appendChild(del);
+      li.appendChild(meta);
+      li.appendChild(actions);
+      return li;
     }
 
     // Editing the extracted text. Gemini's transcription of a handwritten note is a
@@ -949,7 +1196,7 @@
       localStorage.removeItem(TOKEN_KEY);
       $("signoutLink").style.display = "none";
       setStatus(message);
-      $("notes").innerHTML = "<li class='muted'>請先使用 Google 登入</li>";
+      showMessage($("notes"), "請先使用 Google 登入");
       if (window.google && google.accounts && google.accounts.id) google.accounts.id.prompt();
     }
 
@@ -991,6 +1238,8 @@
     $("askBtn").addEventListener("click", ask);
     $("uploadBtn").addEventListener("click", upload);
     $("refreshBtn").addEventListener("click", loadNotes);
+    $("addCategoryBtn").addEventListener("click", addCategory);
+    $("newCategory").addEventListener("keydown", (ev) => { if (ev.key === "Enter") addCategory(); });
     loadModels();
 
     // Sync state first: it decides whether an empty list means "no notes" or "could not
