@@ -118,6 +118,16 @@
     }
     #answer code { background: #ececf3; padding: .1rem .3rem; border-radius: 4px; }
     #answer pre code { background: none; padding: 0; }
+    /* Sources: each citation in the answer opens the note it came from, at that page. */
+    button.cite {
+      margin: 0 .1rem; padding: 0 .45rem; font-size: .75rem; font-weight: 600; line-height: 1.6;
+      vertical-align: baseline; border-radius: 999px; box-shadow: none;
+      background: #eef2ff; color: var(--accent); border: 1px solid #c7d2fe;
+    }
+    button.cite:hover { background: var(--accent); color: #fff; box-shadow: none; }
+    .sources { margin: .6rem 0 0; font-size: .85rem; color: var(--muted); display: flex;
+               flex-wrap: wrap; align-items: center; gap: .3rem; }
+    .sources .dropped { flex-basis: 100%; margin: .2rem 0 0; }
 
     .row { display: flex; gap: .5rem; align-items: end; }
     .muted { color: var(--muted); font-size: .85rem; }
@@ -443,11 +453,14 @@
     // Render text as Markdown (bold/italics/lists) + LaTeX, safely.
     // LaTeX spans are stashed before Markdown runs so things like $m_1$ aren't
     // mangled by Markdown's underscore/asterisk handling, then restored for MathJax.
-    function renderRich(el, text) {
+    // `sources` (from /api/query) are stashed the same way — a file name such as
+    // lv.0_compressed.pdf would otherwise be italicised — and come back as buttons.
+    function renderRich(el, text, sources = []) {
       const math = [];
       const stash = (m) => "@@MATH" + (math.push(m) - 1) + "@@";
       // Collapse runs of blank lines so spacing is uniform, not "weird".
-      const clean = (text || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+      let clean = (text || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+      sources.forEach((s, i) => { clean = clean.split(s.marker).join("@@CITE" + i + "@@"); });
       const protectedText = clean
         .replace(/\$\$[\s\S]+?\$\$/g, stash)
         .replace(/\\\[[\s\S]+?\\\]/g, stash)
@@ -455,8 +468,71 @@
         .replace(/\$[^\n$]+?\$/g, stash);
       let html = DOMPurify.sanitize(marked.parse(protectedText));
       html = html.replace(/@@MATH(\d+)@@/g, (_, i) => escapeHtml(math[Number(i)]));
+      html = html.replace(/@@CITE(\d+)@@/g, (_, i) => citeButton(sources[Number(i)], i));
       el.innerHTML = html;
+      el.querySelectorAll("button.cite").forEach(b =>
+        b.addEventListener("click", () => openSource(sources[Number(b.dataset.cite)])));
       if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
+    }
+
+    const sourceLabel = (s) => {
+      const name = s.id.length > 24 ? s.id.slice(0, 22) + "…" : s.id;
+      return s.page ? `${name} 第 ${s.page} 頁` : name;
+    };
+
+    function citeButton(s, i) {
+      const title = s.page ? `開啟 ${s.id} 第 ${s.page} 頁` : `開啟 ${s.id}`;
+      return `<button type="button" class="cite" data-cite="${i}" title="${escapeHtml(title)}">`
+        + escapeHtml(sourceLabel(s)) + "</button>";
+    }
+
+    // The answer, its inline citations, and a line listing every source it used.
+    function renderAnswer(el, data) {
+      const sources = Array.isArray(data.sources) ? data.sources : [];
+      renderRich(el, data.answer, sources);
+      if (!sources.length && !data.dropped) return;
+      const row = document.createElement("div");
+      row.className = "sources";
+      if (sources.length) {
+        row.appendChild(Object.assign(document.createElement("span"), { textContent: "來源：" }));
+        sources.forEach((s, i) => {
+          const b = Object.assign(document.createElement("button"), {
+            type: "button", className: "cite", textContent: sourceLabel(s),
+            title: s.page ? `開啟 ${s.id} 第 ${s.page} 頁` : `開啟 ${s.id}`,
+          });
+          b.addEventListener("click", () => openSource(s));
+          row.appendChild(b);
+        });
+      }
+      if (data.dropped) {
+        // Said out loud: a removed citation means the model named a page or file that
+        // was not in what it was given, which is worth the user knowing.
+        row.appendChild(Object.assign(document.createElement("p"), {
+          className: "dropped",
+          textContent: `已移除 ${data.dropped} 個對應不到筆記內容的出處標註。`,
+        }));
+      }
+      el.appendChild(row);
+    }
+
+    // Open the note a citation points to, in the side-by-side editor, at the cited page.
+    async function openSource(s) {
+      if (!s) return;
+      const find = () => [...document.querySelectorAll("#notes li[data-note-id]")]
+        .find(li => li.dataset.noteId === s.id);
+      let li = find();
+      if (!li) { await loadNotes(); li = find(); }
+      if (!li) { alert(`找不到筆記「${s.id}」，可能已被刪除。`); return; }
+      const open = li.querySelector(".editor");
+      if (open && open._jump) {
+        open.scrollIntoView({ behavior: "smooth", block: "start" });
+        open._jump(s.page);
+        return;
+      }
+      const n = noteIndex.get(s.id) || {};
+      await openEditor(li, s.id, n.has_original, n.type, s.page);
+      const box = li.querySelector(".editor");
+      if (box) box.scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
     // Render a preview: inline Markdown (bold/italic/code) + LaTeX. Block-only syntax
@@ -498,7 +574,7 @@
                                  category: $("askCategory").value || null }),
         });
         const data = await res.json();
-        if (res.ok) { renderRich($("answer"), data.answer); }
+        if (res.ok) { renderAnswer($("answer"), data); }
         else { $("answer").textContent = "錯誤：" + errText(data, res); }
       } catch (e) {
         $("answer").textContent = "請求失敗：" + e;
@@ -573,6 +649,7 @@
     // list below shows one group per category (plus 未分類), and every group is a drop
     // target, so filing a note is a drag from one group to another.
     let categories = [];
+    const noteIndex = new Map();     // note id -> list entry, for opening a cited note
 
     const showMessage = (el, text) => {
       el.innerHTML = "";
@@ -763,6 +840,8 @@
       fillCategorySelects();
       box.innerHTML = "";
       if (!Array.isArray(notes)) notes = [];
+      noteIndex.clear();
+      for (const n of notes) noteIndex.set(n.id, n);
       if (notes.length === 0 && categories.length === 0) {
         // Not "no notes" when the store never loaded — that was the misleading message.
         showMessage(box, writable ? "（尚無筆記）"
@@ -779,6 +858,7 @@
     // One note row: drag handle, name and preview, actions.
     function noteRow(n) {
       const li = document.createElement("li");
+      li.dataset.noteId = n.id;
       // The handle, not the whole row, is draggable: a draggable row would swallow text
       // selection inside an open editor.
       const grip = Object.assign(document.createElement("span"),
@@ -1003,12 +1083,10 @@
         const n = m[1];
         const b = document.createElement("button");
         b.textContent = n;
+        b.dataset.page = n;
         b.addEventListener("click", () => {
           goto(Number(n));
-          ta.focus();
-          ta.setSelectionRange(m.index, m.index);
-          // Approximate scroll — textarea has no per-line geometry to query.
-          ta.scrollTop = ta.scrollHeight * (m.index / Math.max(text.length, 1));
+          scrollToPage(ta, n);
           bar.querySelectorAll("button").forEach(x => x.classList.remove("on"));
           b.classList.add("on");
         });
@@ -1017,7 +1095,20 @@
       return bar;
     }
 
-    async function openEditor(li, id, hasOriginal, type) {
+    // Put the caret on a page's "## 第 N 頁" heading in the text box. Returns false when the
+    // text has no such heading (a text or image note).
+    function scrollToPage(ta, page) {
+      const m = new RegExp("^##\\s*第\\s*" + Number(page) + "\\s*頁", "m").exec(ta.value);
+      if (!m) return false;
+      ta.focus();
+      ta.setSelectionRange(m.index, m.index);
+      // Approximate scroll — textarea has no per-line geometry to query.
+      ta.scrollTop = ta.scrollHeight * (m.index / Math.max(ta.value.length, 1));
+      return true;
+    }
+
+    // `page` opens the editor already at that page (used when following a citation).
+    async function openEditor(li, id, hasOriginal, type, page = null) {
       if (li.querySelector(".editor")) return;   // already open
       const box = document.createElement("div");
       box.className = "editor";
@@ -1122,6 +1213,7 @@
         const bar = pageJumper(text, goto, ta);
         if (bar) pane.appendChild(bar);
         box.appendChild(pane);   // left
+        box._goto = goto;
       } else if (type === "text") {
         const note = document.createElement("p");
         note.className = "muted pane-label";
@@ -1129,6 +1221,16 @@
         right.insertBefore(note, save);
       }
       box.appendChild(right);
+      // Jump to a cited page: through the page buttons when there are some (they move the
+      // PDF and the text together), otherwise the PDF and the text box directly.
+      box._jump = (p) => {
+        if (!p) return;
+        const b = box.querySelector(`.pages button[data-page="${Number(p)}"]`);
+        if (b) { b.click(); return; }
+        if (box._goto) box._goto(Number(p));
+        scrollToPage(ta, p);
+      };
+      if (page) box._jump(page);
     }
 
     async function deleteNote(id) {

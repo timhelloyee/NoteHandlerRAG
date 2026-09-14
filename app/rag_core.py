@@ -1201,6 +1201,7 @@ PROMPT_TEMPLATE = """你是一個專業的學習筆記問答助手。請「僅�
 2. 參考資料是對原始筆記（文字、圖片或 PDF）逐字擷取後的敘述，請先理解其內容，再依使用者問題作答。
 3. 若使用者詢問的項目散落在多段資料中，請將相關內容整合後再條列回答，並盡量保留原始的關鍵數據與用語，不要省略重要細節。
 4. 請以繁體中文回答。
+5. 每一個重點的句尾都要標註出處，格式為〔來源：檔名 第 N 頁〕；若該筆記沒有「## 第 N 頁」標記，寫〔來源：檔名〕。檔名必須與參考資料中【來源：…】的檔名完全相同，頁碼必須是該筆記中實際出現的「## 第 N 頁」，不可推測。一句話有多個出處時，分別標註。回答「參考資料中沒有記載相關訊息」時不需要標註出處。
 
 【參考資料】
 {context}
@@ -1267,16 +1268,17 @@ def _effective_distance(dist: float, meta: dict, question: str) -> float:
     return dist - min(hits, KEYWORD_BONUS_CAP) * KEYWORD_BONUS
 
 
-def _retrieve(user_id: str, question: str, top_k: int = 10,
-              stores: list[str | None] | None = None) -> list[str]:
-    """Top-k chunks for a question, keyword-boosted and distance-filtered.
+def _retrieve_rows(user_id: str, question: str, top_k: int = 10,
+                   stores: list[str | None] | None = None) -> list[dict]:
+    """Top-k chunks for a question, keyword-boosted and distance-filtered, each with the
+    id, metadata and store it came from (needed to say where an answer came from).
 
     `stores` limits the search to those categories (None in the list = uncategorized).
     Left as None it searches every store — only for a question asked with no category."""
     if stores is None:
         stores = _stores(user_id)
     q_embedding = embed_query(question)
-    pooled: list[tuple[str, float]] = []
+    pooled: list[dict] = []
     for store in stores:
         collection = get_user_collection(user_id, store)
         if collection.count() == 0:
@@ -1286,19 +1288,26 @@ def _retrieve(user_id: str, question: str, top_k: int = 10,
             include=["documents", "distances", "metadatas"],
         )
         docs = results["documents"][0] if results["documents"] else []
+        ids = results["ids"][0] if results.get("ids") else [""] * len(docs)
         dists = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
         metas = (results.get("metadatas") or [[]])[0] or [{}] * len(docs)
-        pooled.extend(zip(docs, (_effective_distance(d, m, question)
-                                 for d, m in zip(dists, metas))))
+        for id_, doc, dist, meta in zip(ids, docs, dists, metas):
+            pooled.append({"id": id_, "doc": doc, "meta": meta or {}, "store": store,
+                           "eff": _effective_distance(dist, meta, question)})
     if not pooled:
         return []
     # Every store uses the same embedder, so distances are comparable across them.
-    scored = sorted(pooled, key=lambda x: x[1])[:top_k]
-    best = scored[0][1]
+    scored = sorted(pooled, key=lambda r: r["eff"])[:top_k]
+    best = scored[0]["eff"]
     if best > RELEVANCE_CEILING:
-        return [scored[0][0]]  # nothing on topic — one chunk is context enough to refuse
-    kept = [doc for doc, eff in scored if eff <= best + RELATIVE_MARGIN]
-    return kept or [scored[0][0]]
+        return scored[:1]  # nothing on topic — one chunk is context enough to refuse
+    return [r for r in scored if r["eff"] <= best + RELATIVE_MARGIN] or scored[:1]
+
+
+def _retrieve(user_id: str, question: str, top_k: int = 10,
+              stores: list[str | None] | None = None) -> list[str]:
+    """The retrieved chunk texts alone (the eval harness measures these)."""
+    return [r["doc"] for r in _retrieve_rows(user_id, question, top_k, stores)]
 
 
 # Whole-corpus mode. When every note fits comfortably in the model's context window,
@@ -1313,9 +1322,15 @@ WHOLE_CORPUS_CHARS = int(os.environ.get("WHOLE_CORPUS_CHARS", 60_000))
 
 
 def _whole_corpus(collections) -> list[str] | None:
-    """One entry per note — chunks rejoined, overlaps removed — or None when the corpus
-    is too big to send whole. Takes one collection or a list of them (one per category
-    being asked); the size limit applies to what would actually be sent.
+    """The note texts of _whole_corpus_notes, without their ids."""
+    notes = _whole_corpus_notes(collections)
+    return None if notes is None else [text for _, text in notes]
+
+
+def _whole_corpus_notes(collections) -> list[tuple[str, str]] | None:
+    """(note id, text) per note — chunks rejoined, overlaps removed — or None when the
+    corpus is too big to send whole. Takes one collection or a list of them (one per
+    category being asked); the size limit applies to what would actually be sent.
 
     Deliberately *not* the raw chunk list: chunks overlap by CHUNK_OVERLAP, so feeding
     them verbatim would repeat text at every seam and split each note across arbitrary
@@ -1337,13 +1352,138 @@ def _whole_corpus(collections) -> list[str] | None:
             by_note.setdefault(_base_id(id_), []).append((doc, meta or {}))
     if not by_note or total > WHOLE_CORPUS_CHARS:
         return None
-    return [text for _, rows in sorted(by_note.items())
+    return [(note_id, text) for note_id, rows in sorted(by_note.items())
             if (text := _join_chunks(rows))]
 
 
-def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = None,
-              category: str | None = None) -> str:
-    """Answer from one category's notes, or from every category when none is chosen.
+# --- sources ------------------------------------------------------------------------
+# An answer the user cannot trace back to their own page is an answer they have to take
+# on trust — and the transcription it rests on is a model's guess at their handwriting.
+# So every note sent to the model is labelled with its file name (PDF pages already carry
+# "## 第 N 頁"), the prompt asks for 〔來源：檔名 第 N 頁〕 after each point, and the server
+# checks every citation against what was actually sent: a file or page that was not in
+# the context is removed rather than shown, since a made-up source is worse than none.
+REFUSAL = "參考資料中沒有記載相關訊息"
+_PAGE_HEADING = re.compile(r"^##\s*第\s*(\d+)\s*頁", re.MULTILINE)
+_CITATION = re.compile(r"[〔【\[]\s*來源\s*[:：]\s*([^〔〕【】\[\]\n]+?)\s*[〕】\]]")
+_PAGE_REF = re.compile(r"第\s*([0-9][0-9\s、,，~～\-–]*)\s*頁?")
+# Split a citation into one part per file: at ；/; always, and at 、/, only when what
+# follows is not a digit, so "第 3、5 頁" stays one part.
+_CITATION_SPLIT = re.compile(r"[；;]|[、,，](?=\s*[^\d\s])")
+
+
+def source_marker(note_id: str, page: int | None) -> str:
+    """The one citation spelling the page and every client rely on."""
+    return f"〔來源：{note_id} 第 {page} 頁〕" if page else f"〔來源：{note_id}〕"
+
+
+def _page_before_chunk(collection, note_id: str, index: int) -> int | None:
+    """The page a retrieved chunk starts on: the last page heading in the chunks before it."""
+    if index <= 0:
+        return None
+    got = collection.get(ids=[f"{note_id}#{i}" for i in range(index)],
+                         include=["documents", "metadatas"])
+    text = _join_chunks(list(zip(got["documents"] or [], got["metadatas"] or [])))
+    pages = _PAGE_HEADING.findall(text)
+    return int(pages[-1]) if pages else None
+
+
+def _retrieval_notes(user_id: str, rows: list[dict]) -> list[tuple[str, str]]:
+    """Group retrieved chunks by note, in reading order. A chunk that starts mid-page is
+    given its page heading back, so the model can cite the page it came from."""
+    grouped: dict[str, list[tuple[int, str]]] = {}
+    for r in rows:
+        note_id = _base_id(r["id"])
+        index = int(r["meta"].get("chunk") or 0)
+        doc = r["doc"] or ""
+        if index and not _PAGE_HEADING.match(doc.lstrip()):
+            page = _page_before_chunk(get_user_collection(user_id, r["store"]), note_id, index)
+            if page:
+                doc = f"## 第 {page} 頁（續）\n{doc}"
+        grouped.setdefault(note_id, []).append((index, doc))
+    return [(note_id, "\n…\n".join(doc for _, doc in sorted(parts)))
+            for note_id, parts in grouped.items()]
+
+
+def _format_context(notes: list[tuple[str, str]]) -> str:
+    return "\n---\n".join(f"【來源：{note_id}】\n{text}" for note_id, text in notes)
+
+
+def _expand_pages(text: str) -> list[list[int]]:
+    """Page references as groups: [[3], [5]] for 第 3、5 頁, [[3, 4, 5]] for 第 3-5 頁.
+    A range is one reference — it is valid if any page in it exists."""
+    groups: list[list[int]] = []
+    for ref in _PAGE_REF.findall(text):
+        for token in re.split(r"[、,，\s]+", ref.strip()):
+            span = re.split(r"[~～\-–]", token)
+            if len(span) == 2 and span[0].isdigit() and span[1].isdigit():
+                lo, hi = int(span[0]), int(span[1])
+                groups.append(list(range(lo, hi + 1)) if 0 <= hi - lo <= 50 else [lo, hi])
+            elif token.isdigit():
+                groups.append([int(token)])
+    return groups
+
+
+def _resolve_citations(answer: str, notes: list[tuple[str, str]]) -> tuple[str, list[dict], int]:
+    """Check every citation in the answer against the notes that were sent.
+
+    Returns the answer with each valid citation rewritten to source_marker() form and
+    each invalid one removed, the distinct sources in order of first appearance, and how
+    many citations were dropped."""
+    pages = {note_id: {int(p) for p in _PAGE_HEADING.findall(text)} for note_id, text in notes}
+    ids_longest_first = sorted(pages, key=len, reverse=True)
+    sources: list[dict] = []
+    seen: set[tuple[str, int | None]] = set()
+    dropped = 0
+
+    def cited_id(part: str) -> str | None:
+        return next((i for i in ids_longest_first if i in part), None)
+
+    def replace(match: re.Match) -> str:
+        nonlocal dropped
+        refs: list[tuple[str, int | None]] = []
+        current = None
+        for part in _CITATION_SPLIT.split(match.group(1)):
+            if not part.strip():
+                continue
+            note_id = cited_id(part)
+            # A part naming no known file is either more pages of the file before it
+            # ("第 3 頁；第 5 頁") or a file that was not in the context.
+            if note_id is None and (current is None or _PAGE_REF.sub("", part).strip()):
+                dropped += 1
+                current = None
+                continue
+            if note_id is not None:
+                current = note_id
+                part = part.replace(note_id, " ")
+            groups = _expand_pages(part)
+            if not groups:
+                if note_id is not None:
+                    refs.append((current, None))
+                continue
+            for group in groups:
+                if not pages[current]:
+                    refs.append((current, None))   # a note without pages: cite the note
+                    continue
+                found = [p for p in group if p in pages[current]]
+                refs.extend((current, p) for p in found)
+                if not found:
+                    dropped += 1        # a page that was not in the context
+        out = []
+        for ref in dict.fromkeys(refs):
+            out.append(source_marker(*ref))
+            if ref not in seen:
+                seen.add(ref)
+                sources.append({"id": ref[0], "page": ref[1], "marker": source_marker(*ref)})
+        return "".join(out)
+
+    return _CITATION.sub(replace, answer), sources, dropped
+
+
+def rag_answer(user_id: str, question: str, top_k: int = 10, model: str | None = None,
+               category: str | None = None) -> dict:
+    """Answer from one category's notes, or from every category when none is chosen, with
+    the sources the answer cites: {"answer", "sources": [{id, page, marker}], "dropped"}.
 
     With a category, only that category's folder is opened: notes in other categories
     are never read, retrieved or sent to the model."""
@@ -1352,15 +1492,22 @@ def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = 
     require_loaded()
     _require_category(user_id, category)
     stores = [category] if category is not None else _stores(user_id)
-    docs = _whole_corpus([get_user_collection(user_id, s) for s in stores])
-    if docs is None:
-        docs = _retrieve(user_id, question, top_k, stores=stores)
-    if not docs:
-        return "參考資料中沒有記載相關訊息"
-    context = "\n---\n".join(docs)
+    notes = _whole_corpus_notes([get_user_collection(user_id, s) for s in stores])
+    if notes is None:
+        notes = _retrieval_notes(user_id, _retrieve_rows(user_id, question, top_k, stores))
+    if not notes:
+        return {"answer": REFUSAL, "sources": [], "dropped": 0}
     # Use replace (not str.format) so literal { } in LaTeX examples don't break.
-    prompt = PROMPT_TEMPLATE.replace("{context}", context).replace("{question}", question)
-    return _llm_invoke(prompt, model=model)
+    prompt = (PROMPT_TEMPLATE.replace("{context}", _format_context(notes))
+              .replace("{question}", question))
+    answer, sources, dropped = _resolve_citations(_llm_invoke(prompt, model=model), notes)
+    return {"answer": answer, "sources": sources, "dropped": dropped}
+
+
+def rag_query(user_id: str, question: str, top_k: int = 10, model: str | None = None,
+              category: str | None = None) -> str:
+    """rag_answer's text alone, citations included."""
+    return rag_answer(user_id, question, top_k, model, category)["answer"]
 
 
 # Restore any previously-saved vectorstores from the backing Dataset (runs once at

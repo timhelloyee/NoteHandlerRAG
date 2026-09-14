@@ -65,7 +65,14 @@ def ask(rc, user: str, question: str | None, category_name: str | None,
         return 1
     model = rc.resolve_model(model)
     print(f"（範圍：{category_name or '全部類別'}，模型：{model}）\n")
-    print(rc.rag_query(user, question, top_k=top_k, model=model, category=category))
+    result = rc.rag_answer(user, question, top_k=top_k, model=model, category=category)
+    print(result["answer"])
+    if result["sources"]:
+        print("\n來源：")
+        for s in result["sources"]:
+            print(f"  - {s['id']}" + (f" 第 {s['page']} 頁" if s["page"] else ""))
+    if result["dropped"]:
+        print(f"\n（已移除 {result['dropped']} 個對應不到筆記內容的出處標註）")
     return 0
 
 

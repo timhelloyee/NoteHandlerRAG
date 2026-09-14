@@ -149,9 +149,17 @@ class QueryRequest(BaseModel):
     category: str | None = None     # None: search every category
 
 
+class Source(BaseModel):
+    id: str                 # note id (file name)
+    page: int | None = None
+    marker: str             # how the citation is written in `answer`
+
+
 class QueryResponse(BaseModel):
     answer: str
     model: str
+    sources: list[Source] = []   # every citation in `answer`, checked against the notes sent
+    dropped: int = 0             # citations removed because they named no note or page sent
 
 
 @app.get("/api/models")
@@ -171,11 +179,11 @@ def query(req: QueryRequest, user: str = Depends(current_user)):
         raise HTTPException(status_code=400, detail="問題不可為空")
     model = rag_core.resolve_model(req.model)
     try:
-        answer = rag_core.rag_query(user, req.question, top_k=req.top_k, model=model,
-                                    category=_category_param(req.category))
+        result = rag_core.rag_answer(user, req.question, top_k=req.top_k, model=model,
+                                     category=_category_param(req.category))
     except rag_core.ModelUnavailableError:
         raise HTTPException(status_code=503, detail=_busy_detail(model))
-    return QueryResponse(answer=answer, model=model)
+    return QueryResponse(model=model, **result)
 
 
 def _decode_text(raw: bytes) -> str:
