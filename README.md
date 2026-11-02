@@ -80,8 +80,9 @@ docs/         GitHub Pages copy of the frontend (index.html only)
 scripts/      command-line tools: dev_server.py, notehandler_input.py,
               notehandler_output.py, embed_folder.py
 tests/        standalone test scripts (python tests/test_*.py)
-eval/         research harness for the retrieval experiments, with its data and reviews
-handoff/      project documents: PROJECT_OVERVIEW.md, ROADMAP.md, PROGRESS.md
+eval/         research measurements (R0 NotebookLM baseline; G0 gold transcripts, kept local)
+handoff/      project documents: 專題總覽.md (overview, progress, roadmap, technical
+              reference), 實驗架構.md (experiment design), 文獻整理.md
 samples/      small example notes (text/ and images/) for trying the scripts
 ```
 

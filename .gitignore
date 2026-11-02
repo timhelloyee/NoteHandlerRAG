@@ -23,15 +23,26 @@ __pycache__/
 venv/
 env/
 
-# Cached Gemini page extractions (regenerable, and they contain note content)
-eval/cache/
-eval/corpus/
+# G0: hand-corrected transcripts of the author's real notes (the gold standard for
+# character error rate) and the raw whole-page Gemini baseline. Both are note content.
+eval/g0/
 
-# B0 working kit: contains the user's note content, regenerable from the corpus
-eval/b0/pages/
-eval/b0/pages v2/
-eval/b0/*_校正問題.md
+# Full results of the retired retrieval-structure line; per-probe rows quote note content
 eval/RESULTS_gating.txt
+
+# R0 baseline: the answer key and the handwritten scans stay local
+# (the key would leak the test; scans show the author's handwriting)
+eval/r0/題組與標準答案.md
+eval/r0/標準辨識稿.md
+eval/r0/關鍵事實.md
+eval/r0/關鍵事實.sha256.txt
+# NotebookLM's answers are close to the answer key
+eval/r0/NotebookLM_提問單.md
+eval/r0/*.jpg
+eval/r0/*.jpeg
+eval/r0/*.png
+eval/r0/*.pdf
+eval/r0/results/
 
 # local dev store (scripts/dev_server.py) — never the real vectorstores
 .devstore/
