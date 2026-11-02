@@ -14,6 +14,7 @@ without user correction, against NotebookLM** (see `handoff/實驗架構.md` and
 | `r0/score.py` | Answer verdicts, character error rate, and three deterministic "unsupported content" rules with their error-injection check | yes |
 | `r0/compare_runs.py` | Several runs side by side, with every character each one misread | yes |
 | `r0/run_vote.py` | Reads each page N times with sampling on and votes per character; scores the vote and the "reads disagree = suspect" flag | yes |
+| `r0/run_qwen.py` | Bundles the app's image prompt and the scans for a rented GPU, reads them with Qwen3-VL, and scores it against Gemini | yes |
 | `r0/*.jpg` / `r0/results/<run>/` | Scans of the handwritten pages; per run: transcripts, answers, `meta.json` (model, prompts, commit), `score.md` | no |
 | `g0/transcripts/` | 66 pages of hand-corrected transcripts of the author's real notes — the gold standard for character error rate (G0/G1) | no (note content) |
 | `g0/baseline_gemini_whole_page.json` | The same pages as Gemini read them whole-page, before any correction — the starting point of the G1 ablation | no (note content) |

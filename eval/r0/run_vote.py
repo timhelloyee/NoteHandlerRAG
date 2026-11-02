@@ -93,6 +93,20 @@ def wrong_positions(ref: str, hyp: str) -> set:
     return bad
 
 
+def detection(ref: str, pivot: str, flags: list) -> Counter:
+    """Suspect flags vs real errors (tp/fp/fn/tn), over pivot characters aligned one-to-one
+    with the gold text. An unequal replace is a diagram description lined up against a
+    missing gold line, not a run of misread characters, so it is left out."""
+    c = Counter()
+    for op, i1, i2, j1, j2 in SequenceMatcher(None, ref, pivot, autojunk=False).get_opcodes():
+        if op not in ("equal", "replace") or i2 - i1 != j2 - j1:
+            continue
+        for t in range(j1, j2):
+            err, flag = op == "replace", flags[t]
+            c["tp" if err and flag else "fn" if err else "fp" if flag else "tn"] += 1
+    return c
+
+
 def score(out: Path, n: int) -> list:
     gold = gold_text_sections(HERE / "標準辨識稿.md")
     lines = []
@@ -117,15 +131,7 @@ def score(out: Path, n: int) -> list:
             if m == n:
                 tot.setdefault("stable_chars", [])
                 tot["stable_chars"].append(f"p{p}「{ref[j]}」")
-        # Suspect flags vs real errors, over pivot characters aligned one-to-one with the gold
-        # text. An unequal replace is a diagram description lined up against a missing gold
-        # line, not a run of misread characters, so it is left out.
-        for op, i1, i2, j1, j2 in SequenceMatcher(None, ref, pivot, autojunk=False).get_opcodes():
-            if op not in ("equal", "replace") or i2 - i1 != j2 - j1:
-                continue
-            for t in range(j1, j2):
-                err, flag = op == "replace", flags[t]
-                tot["tp" if err and flag else "fn" if err else "fp" if flag else "tn"] += 1
+        tot.update(detection(ref, pivot, flags))
         lines.append(f"| p{p} | {len(ref)} | {s + d} | {sum(flags)} |")
     N = tot["N"]
     singles = [c["err"] for c in single]
@@ -134,7 +140,7 @@ def score(out: Path, n: int) -> list:
     return [
         "## 辨識層", "",
         "| | 漏/錯字 | 比例 |", "|---|---|---|",
-        f"| 單次讀（溫度 0，baseline） | 16/916 | 1.7% |",
+        f"| Gemini 單次讀（溫度 0，baseline） | 16/916 | 1.7% |",
         f"| 單次讀（本次溫度，5 次各自） | {'、'.join(map(str, singles))} / {N} | "
         f"{min(singles) / N:.1%}–{max(singles) / N:.1%} |",
         f"| **投票後** | {tot['voted']}/{N} | **{tot['voted'] / N:.1%}** |", "",
