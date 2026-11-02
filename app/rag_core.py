@@ -53,6 +53,7 @@ _vision_clients = [genai.Client(api_key=k) for k in _VISION_KEY_ORDER]
 # a -preview id. The UI offers exactly this list (served by /api/models) and requests
 # are validated against it, so a caller can't push an arbitrary string to the API.
 AVAILABLE_MODELS = [
+    {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
     {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash"},
     {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash"},
     {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash"},
@@ -786,6 +787,8 @@ def chunk_by_structure(text: str, size: int = CHUNK_CHARS,
 # The Gemini describe prompts end the description with a "關鍵字：…" line (free — same
 # API call). Stored per chunk in metadata, the keywords give exact-match anchors that
 # pure cosine similarity lacks; rag_query uses them as a small ranking boost.
+KEYWORDS_PER_NOTE = 10   # the describe prompts ask for 5-10; the single-page and
+                         # assembled-PDF paths must not disagree on the cap.
 _KEYWORD_LINE = re.compile(r"關鍵字[:：]\s*(.+)")
 
 
@@ -795,7 +798,7 @@ def _keywords_of(description: str) -> str:
     if not m:
         return ""
     kws = [k.strip() for k in re.split(r"[、,，;；/]\s*", m.group(1)) if k.strip()]
-    return "、".join(kws[:10])
+    return "、".join(kws[:KEYWORDS_PER_NOTE])
 
 
 # Config B4 of the structure experiment: ask the model to emit the note's hierarchy as
@@ -816,7 +819,7 @@ def describe_image(image_path: str, model: str | None = None,
     prompt = """請以繁體中文，完整且忠實地擷取並整理這張筆記圖片中的所有內容，不要遺漏。
 
 請遵守以下規則：
-1. 在最開頭先判斷這是什麼科目（國文、英文、數學、物理、化學、地球科學、生物、地理、公民、歷史、程式設計擇一），格式為：這是一份【科目】科的筆記。
+1. 在最開頭先判斷這是什麼科目（國文、英文、數學、物理、化學、地球科學、生物、地理、公民、歷史、程式設計擇一），格式為：這是一份【科目】科的筆記。整頁沒有任何可辨識的內容時，科目寫「無法辨識」。
 2. 逐項記錄圖片中「實際出現的內容」，包括：定義、公式、定理、重要名詞、例題與其完整條件（已知數值、單位、所求）。不要只寫「涉及……的計算」這類概括性描述，而要寫出真正的內容與細節。
 3. 數學式請使用 LaTeX 表示（行內以 $...$，獨立公式以 $$...$$ 包住，例如 $F = \\dfrac{G m_1 m_2}{r^2}$），以忠實保留上下標與符號。
 4. 只描述圖片中實際出現的內容，不要編造；無法辨識處請標註為（無法辨識）。
@@ -850,7 +853,7 @@ def subject_of(text: str) -> str:
 PDF_PAGE_PROMPT = """請以繁體中文，完整且忠實地擷取並整理這一頁筆記的所有內容，不要遺漏。
 
 請遵守以下規則：
-1. 在最開頭先判斷這是什麼科目（國文、英文、數學、物理、化學、地球科學、生物、地理、公民、歷史、程式設計擇一），格式為：這是一份【科目】科的筆記。
+1. 在最開頭先判斷這是什麼科目（國文、英文、數學、物理、化學、地球科學、生物、地理、公民、歷史、程式設計擇一），格式為：這是一份【科目】科的筆記。整頁沒有任何可辨識的內容時，科目寫「無法辨識」。
 2. 逐項記錄這一頁「實際出現的內容」，包括：定義、公式、定理、重要名詞、例題與其完整條件（已知數值、單位、所求）。不要只寫「涉及……的計算」這類概括性描述，而要寫出真正的內容與細節。表格請逐列轉成文字，不可略過。
 3. 數學式請使用 LaTeX 表示（行內以 $...$，獨立公式以 $$...$$ 包住），以忠實保留上下標與符號。程式碼請用 ``` 圍起來並保留縮排。
 4. 只描述這一頁實際出現的內容，不要編造，也不要補充其他頁的內容；無法辨識處請標註為（無法辨識）。
@@ -940,7 +943,7 @@ def describe_pdf(pdf_path: str, model: str | None = None,
     body = (nl + nl).join(
         f'## 第 {n} 頁' + nl + _strip_page_furniture(t) for n, t in kept)
     head = f'這是一份【{subject}】科的筆記。' + nl + nl if subject != '?' else ''
-    tail = (nl + nl + '關鍵字：' + '、'.join(keywords[:12])) if keywords else ''
+    tail = (nl + nl + '關鍵字：' + '、'.join(keywords[:KEYWORDS_PER_NOTE])) if keywords else ''
     return head + body + tail
 
 
@@ -1234,8 +1237,9 @@ PROMPT_TEMPLATE = """你是一個專業的學習筆記問答助手。請「僅�
 # Both numbers are raw distances, so both belong to the EMBEDDER, not to the app: e5
 # packs unrelated Traditional Chinese around 0.77 cosine, Qwen3 pushes it to ~0.31, and
 # the same 0.38 ceiling that admits every real answer under e5 rejects all of them under
-# Qwen3 (measured worst present distance 1.125). Calibrate a new model with
-# eval/calibrate_gate.py before adding it here; the env vars override for experiments.
+# Qwen3 (measured worst present distance 1.125). Calibrate a new model before adding it
+# here (the calibration script, eval/calibrate_gate.py, was retired with the retrieval
+# research and is in git history); the env vars override for experiments.
 _GATE_BY_MODEL = {                     # model: (ceiling, margin)
     "intfloat/multilingual-e5-base": (0.38, 0.10),
     # ceiling 1.00 = best single split of present (max 1.125) vs absent (min 0.830);
@@ -1244,7 +1248,7 @@ _GATE_BY_MODEL = {                     # model: (ceiling, margin)
 }
 if EMBED_MODEL not in _GATE_BY_MODEL:
     print(f"[rag_core] WARNING: no calibrated gate for {EMBED_MODEL}; using e5's values. "
-          f"Run eval/calibrate_gate.py and add it to _GATE_BY_MODEL.")
+          f"Calibrate its gate and add it to _GATE_BY_MODEL.")
 _ceiling, _margin = _GATE_BY_MODEL.get(EMBED_MODEL, (0.38, 0.10))
 RELEVANCE_CEILING = float(os.environ.get("RELEVANCE_CEILING", _ceiling))
 RELATIVE_MARGIN = float(os.environ.get("RELATIVE_MARGIN", _margin))
