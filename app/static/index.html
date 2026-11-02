@@ -29,6 +29,24 @@
       font-family: var(--font-family);
       font-size: var(--font-size);
     }
+    /* Derived from the editable tokens above, so a colour changed in /ui-editor carries
+       through to every tint, outline and focus ring instead of leaving stale hex behind. */
+    html {
+      --accent-soft: color-mix(in srgb, var(--accent) 9%, var(--card));
+      --accent-line: color-mix(in srgb, var(--accent) 30%, var(--card));
+      --accent-press: color-mix(in srgb, var(--accent) 86%, #000);
+      --danger-line: color-mix(in srgb, var(--danger) 32%, var(--card));
+      --field: color-mix(in srgb, var(--bg-body) 45%, var(--card));
+      --well: color-mix(in srgb, var(--bg-body) 80%, var(--card));
+      --focus: color-mix(in srgb, var(--accent-2) 30%, transparent);
+      accent-color: var(--accent);
+      caret-color: var(--accent);
+      scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent;
+    }
+    ::selection { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+    ::placeholder { color: var(--muted); opacity: 1; }
+    :focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+    a { color: var(--accent); text-underline-offset: .18em; }
     * { box-sizing: border-box; }
     body {
       max-width: var(--page-width); margin: 0 auto; padding: 2.5rem 1.25rem 4rem;
@@ -41,10 +59,10 @@
     .app-header h1 {
       font-family: var(--font-heading);
       font-size: 2.1rem; margin: 0 0 .35rem; font-weight: 800; letter-spacing: -.02em;
-      background: linear-gradient(90deg, var(--accent), var(--accent-2));
-      -webkit-background-clip: text; background-clip: text; color: transparent;
+      display: inline-flex; align-items: center; gap: .55rem; color: var(--ink);
     }
-    .tagline { color: var(--muted); margin: 0; font-size: .95rem; }
+    .app-header .mark { color: var(--accent); flex: none; }
+    .tagline { color: color-mix(in srgb, var(--muted) 65%, var(--ink)); margin: 0; font-size: .95rem; }
 
     /* Cloud-sync banner: why notes are missing, or that a change has not been saved. */
     .banner {
@@ -60,71 +78,78 @@
       background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
       padding: 1.3rem 1.4rem; margin-bottom: 1.25rem; box-shadow: var(--shadow);
     }
-    label { font-weight: 600; display: block; margin-bottom: .45rem; font-size: .95rem; }
+    label { font-weight: 600; display: block; margin-bottom: .45rem; font-size: .9rem; }
+    /* What a card is about, as opposed to the fields inside it. */
+    .title { font-size: 1.05rem; font-weight: 700; margin: 0 0 .6rem; display: block; }
 
     /* Inputs */
     input, textarea, button, select { font: inherit; }
     select {
       padding: .5rem .7rem; border: 1px solid var(--border); border-radius: 10px;
-      background: #fbfcfe; color: var(--ink); cursor: pointer; max-width: 100%;
+      background: var(--field); color: var(--ink); cursor: pointer; max-width: 100%;
     }
-    select:focus { outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+    select:focus { outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 3px var(--focus); }
     .model-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: .8rem; }
     .model-row label { margin: 0; white-space: nowrap; }
     input[type=text], textarea {
       width: 100%; padding: .65rem .8rem; border: 1px solid var(--border); border-radius: 10px;
-      background: #fbfcfe; transition: border-color .15s, box-shadow .15s;
+      background: var(--field); color: var(--ink); transition: border-color .15s, box-shadow .15s;
     }
     input[type=text]:focus, textarea:focus {
-      outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(37,99,235,.15);
+      outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 3px var(--focus);
     }
     textarea { min-height: 90px; resize: vertical; }
     input[type=file] {
       width: 100%; padding: .55rem; border: 1px dashed var(--border); border-radius: 10px;
-      background: #fbfcfe; cursor: pointer;
+      background: var(--field); color: var(--ink); cursor: pointer;
     }
     input[type=file]::file-selector-button {
       margin-right: .8rem; padding: .4rem .8rem; border: 0; border-radius: 8px;
-      background: #eef2ff; color: var(--accent); font-weight: 600; cursor: pointer;
+      background: var(--accent-soft); color: var(--accent); font-weight: 600; cursor: pointer;
     }
 
     /* Buttons */
     button {
       margin-top: .6rem; padding: .6rem 1.2rem; border: 0; border-radius: 10px;
-      background: linear-gradient(180deg, var(--accent), var(--accent-2)); color: #fff;
-      font-weight: 600; cursor: pointer; box-shadow: 0 1px 2px rgba(37,99,235,.3);
-      transition: transform .08s, box-shadow .15s;
+      background: var(--accent); color: #fff;
+      font-weight: 600; cursor: pointer;
+      transition: background-color .15s, border-color .15s, color .15s, transform .08s;
     }
-    button:hover { box-shadow: 0 4px 14px rgba(37,99,235,.35); }
+    button:hover { background: var(--accent-press); }
     button:active { transform: translateY(1px); }
-    button:disabled { background: #aab6e6; cursor: default; box-shadow: none; }
-    #refreshBtn { background: #eef2ff; color: var(--accent); box-shadow: none; }
-    #refreshBtn:hover { background: #e0e7ff; box-shadow: none; }
+    /* One rule for every button and picker, so a locked control never looks live. */
+    button:disabled, select:disabled { opacity: .5; pointer-events: none; }
+    #refreshBtn { background: var(--accent-soft); color: var(--accent); }
+    #refreshBtn:hover { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
 
     /* Answer */
     #answer {
-      background: #f7f9fc; border: 1px solid var(--border); border-radius: 10px;
+      background: var(--well); border: 1px solid var(--border); border-radius: 10px;
       padding: 1rem 1.1rem; margin-top: .75rem; min-height: 1rem; overflow-x: auto;
     }
     #answer:empty { display: none; }
+    /* Waiting and failing must not look like an answer. */
+    #answer.pending { color: var(--muted); animation: pending 1.4s ease-in-out infinite; }
+    #answer.error { background: #fdecea; border-color: #f3b8b1; color: #8a1c12; }
+    @keyframes pending { 50% { opacity: .45; } }
     #answer p { margin: .5rem 0; }
     #answer ul, #answer ol { margin: .5rem 0; padding-left: 1.4rem; }
     #answer li { margin: .15rem 0; }
     #answer p:first-child, #answer h1:first-child, #answer h2:first-child, #answer h3:first-child, #answer ul:first-child, #answer ol:first-child { margin-top: 0; }
     #answer p:last-child, #answer ul:last-child, #answer ol:last-child { margin-bottom: 0; }
-    #answer pre { background: #ececf3; padding: .6rem; border-radius: 8px; overflow-x: auto; }
+    #answer pre { background: var(--border); padding: .6rem; border-radius: 8px; overflow-x: auto; }
     #answer code, #answer pre, .preview code, .preview pre, .full code, .full pre {
       font-family: var(--font-mono);
     }
-    #answer code { background: #ececf3; padding: .1rem .3rem; border-radius: 4px; }
+    #answer code { background: var(--border); padding: .1rem .3rem; border-radius: 4px; }
     #answer pre code { background: none; padding: 0; }
     /* Sources: each citation in the answer opens the note it came from, at that page. */
     button.cite {
       margin: 0 .1rem; padding: 0 .45rem; font-size: .75rem; font-weight: 600; line-height: 1.6;
-      vertical-align: baseline; border-radius: 999px; box-shadow: none;
-      background: #eef2ff; color: var(--accent); border: 1px solid #c7d2fe;
+      vertical-align: baseline; border-radius: 999px;
+      background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line);
     }
-    button.cite:hover { background: var(--accent); color: #fff; box-shadow: none; }
+    button.cite:hover { background: var(--accent); color: #fff; }
     .sources { margin: .6rem 0 0; font-size: .85rem; color: var(--muted); display: flex;
                flex-wrap: wrap; align-items: center; gap: .3rem; }
     .sources .dropped { flex-basis: 100%; margin: .2rem 0 0; }
@@ -142,18 +167,33 @@
     #notes li:last-child { border-bottom: 0; }
     #notes li.muted { border-bottom: 0; justify-content: flex-start; }
     #notes .meta { word-break: break-word; font-size: .9rem; flex: 1; min-width: 12rem; }
+    /* Name first, then two lines of what is inside: enough to recognise a note without
+       the row growing to the height of the note itself. 展開更多 shows the rest. */
+    .note-name { font-weight: 600; }
+    .note-type {
+      font-size: .7rem; font-weight: 600; color: var(--muted); letter-spacing: .02em;
+      border: 1px solid var(--border); border-radius: 5px; padding: 0 .35rem;
+      margin-right: .4rem; vertical-align: .08em; white-space: nowrap;
+    }
+    .note-preview {
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+      overflow: hidden; color: var(--muted); font-size: .85rem; margin-top: .1rem;
+    }
     button.del {
       margin-top: 0; padding: .35rem .75rem; font-size: .8rem; flex: none;
-      background: #fff; color: var(--danger); border: 1px solid #f1c4c4; box-shadow: none;
+      background: var(--card); color: var(--danger); border: 1px solid var(--danger-line);
     }
-    button.del:hover { background: var(--danger); color: #fff; border-color: var(--danger); box-shadow: 0 3px 10px rgba(220,38,38,.3); }
+    button.del:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
     button.edit {
       margin-top: 0; padding: .35rem .75rem; font-size: .8rem; flex: none;
-      background: #fff; color: var(--accent); border: 1px solid #c7d2fe; box-shadow: none;
+      background: var(--card); color: var(--accent); border: 1px solid var(--accent-line);
     }
-    button.edit:hover { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 3px 10px rgba(79,70,229,.3); }
+    button.edit:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
     #notes li { flex-wrap: wrap; }
-    .note-actions { display: flex; gap: .4rem; flex: none; }
+    .note-actions { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+    /* Every control in a row is the same height, whichever class it borrowed. */
+    .note-actions .toggle, .note-actions select.move { padding: .35rem .65rem; font-size: .8rem; }
+    .note-actions > * { min-height: 2.1rem; }
     /* Editor: the original on the left, what the model read on the right. Seeing them
        together is the only way a user finds out the transcription is wrong. */
     .editor { flex-basis: 100%; margin-top: .6rem; }
@@ -163,7 +203,7 @@
     .editor .pane-label { font-size: .8rem; color: var(--muted); margin: 0 0 .3rem; }
     .original { min-width: 0; }
     .original img, .original iframe {
-      width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #fff;
+      width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--card);
     }
     .original img { display: block; height: auto; }
     .original iframe { height: 420px; }
@@ -178,8 +218,10 @@
     .pages { display: flex; flex-wrap: wrap; gap: .25rem; margin: .4rem 0 0; }
     .pages button {
       margin-top: 0; padding: .2rem .5rem; font-size: .75rem; flex: none;
-      background: #fff; color: var(--accent); border: 1px solid #c7d2fe; box-shadow: none;
+      background: var(--card); color: var(--accent); border: 1px solid var(--accent-line);
+      font-variant-numeric: tabular-nums;
     }
+    .pages button:hover { background: var(--accent-soft); }
     .pages button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
     /* Live preview: the stored text is Markdown + LaTeX, which a student should not have
        to read in order to fix a wrong digit. Showing the rendered result as they type
@@ -188,7 +230,7 @@
     .preview-bar .pane-label { margin: 0; }
     .preview {
       border: 1px solid var(--border); border-radius: 8px; padding: .6rem .8rem;
-      background: #fbfbfd; font-size: .9rem; line-height: 1.6; max-height: 300px;
+      background: var(--well); font-size: .9rem; line-height: 1.6; max-height: 300px;
       overflow: auto; word-break: break-word;
     }
     .preview :first-child { margin-top: 0; }
@@ -197,13 +239,13 @@
     .preview th, .preview td { border: 1px solid var(--border); padding: .2rem .45rem; }
     .toggle {
       margin-top: 0; padding: .2rem .55rem; font-size: .75rem; flex: none;
-      background: #fff; color: var(--muted); border: 1px solid var(--border); box-shadow: none;
+      background: var(--card); color: var(--muted); border: 1px solid var(--border);
     }
-    .toggle:hover { background: var(--border); color: var(--fg); box-shadow: none; }
+    .toggle:hover { background: var(--border); color: var(--ink); }
     /* Expanded full note text under a list row */
     .full {
       flex-basis: 100%; margin: .5rem 0 0; border: 1px solid var(--border);
-      border-radius: 8px; padding: .6rem .8rem; background: #fbfbfd;
+      border-radius: 8px; padding: .6rem .8rem; background: var(--well);
       font-size: .85rem; line-height: 1.6; max-height: 340px; overflow: auto;
     }
     .full :first-child { margin-top: 0; }
@@ -213,31 +255,45 @@
     .cat-add input[type=text] { flex: 1; }
     .cat-add button { margin-top: 0; white-space: nowrap; }
     .cat-group {
-      border: 1px solid var(--border); border-radius: 10px; padding: .55rem .8rem;
-      margin-bottom: .75rem; transition: border-color .12s, background .12s;
+      border-top: 1px solid var(--border); padding: .8rem .5rem .4rem; margin: 0 -.5rem;
+      transition: background-color .12s;
     }
-    .cat-group.drop { border-color: var(--accent); background: #eef2ff; }
+    .cat-group.drop {
+      background: var(--accent-soft); border-radius: 10px;
+      outline: 2px dashed var(--accent-line); outline-offset: -2px;
+    }
     .cat-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
     .cat-name { font-weight: 700; }
     .cat-group.none .cat-name { color: var(--muted); font-weight: 600; }
     .cat-count {
-      font-size: .75rem; color: var(--muted); background: #f1f3f9;
-      border-radius: 999px; padding: 0 .5rem;
+      font-size: .75rem; color: var(--muted); background: var(--well);
+      border-radius: 999px; padding: 0 .5rem; font-variant-numeric: tabular-nums;
     }
     .cat-tools { margin-left: auto; display: flex; gap: .3rem; }
     .cat-tools .danger { color: var(--danger); }
     .cat-notes { margin-top: .2rem; }
     .cat-notes .empty { color: var(--muted); font-size: .85rem; padding: .5rem .2rem; border-bottom: 0; }
     .grip {
-      cursor: grab; color: var(--muted); padding: 0 .35rem 0 0; user-select: none;
-      font-size: 1rem; line-height: 1;
+      cursor: grab; color: var(--muted); padding: .45rem .5rem .45rem .15rem; user-select: none;
+      display: inline-flex; border-radius: 6px;
     }
+    .grip:hover { color: var(--ink); background: var(--well); }
+    .grip:active { cursor: grabbing; }
     .grip[draggable=false] { cursor: default; opacity: .4; }
     #notes li.dragging { opacity: .45; }
     select.move { padding: .25rem .4rem; font-size: .8rem; border-radius: 8px; }
+    #signoutLink { margin-left: .5rem; }
     @media (max-width: 720px) {
       .editor.split { grid-template-columns: 1fr; }
       .editor textarea { min-height: 260px; }
+    }
+    /* Fingers need more than a 26px target; a mouse does not. */
+    @media (pointer: coarse) {
+      .note-actions button, .cat-tools button, select.move, .pages button { min-height: 2.75rem; }
+      .pages button { min-width: 2.75rem; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
     }
   </style>
   <script>
@@ -257,21 +313,21 @@
 </head>
 <body>
   <header class="app-header">
-    <h1>📒 NoteHandlerRAG</h1>
+    <h1><svg class="mark" viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="15" height="18" rx="2.5"/><path d="M9 3v18M3 8h4M3 12h4M3 16h4M13 8h4M13 12h3"/></svg>NoteHandlerRAG</h1>
     <p class="tagline">多模態筆記檢索 · 文字、圖片與 PDF 智慧問答</p>
   </header>
 
   <div id="syncBanner" class="banner" role="status" hidden></div>
 
   <section>
-    <label>Google 帳號</label>
+    <h2 class="title">Google 帳號</h2>
     <div id="gsiButton"></div>
     <p id="googleStatus" class="muted">使用 Google 登入後，才能看到與管理你的筆記。
       <a id="signoutLink" href="#" style="display:none">登出</a></p>
   </section>
 
   <section>
-    <label for="question">問問題</label>
+    <label class="title" for="question">問問題</label>
     <textarea id="question" placeholder="輸入問題，例如：輸出每一個科目統整後的筆記內容"></textarea>
     <div class="model-row">
       <label for="askCategory">問題範圍</label>
@@ -284,12 +340,12 @@
     </div>
     <p class="muted">此模型用於回答問題，以及解析上傳的圖片／PDF。</p>
     <button id="askBtn">送出</button>
-    <div id="answer"></div>
+    <div id="answer" aria-live="polite"></div>
   </section>
 
   <section>
-    <label>筆記分類</label>
-    <p class="muted">只會顯示你登入的 Google 帳號所儲存的筆記。按住筆記左邊的 ⠿ 拖到其他類別即可移動；手機上可用「移到」選單。</p>
+    <h2 class="title">筆記分類</h2>
+    <p class="muted">只會顯示你登入的 Google 帳號所儲存的筆記。按住筆記左邊的拖曳把手，拖到其他類別即可移動；手機上可用「移到」選單。</p>
     <div class="cat-add">
       <input type="text" id="newCategory" maxlength="30" placeholder="新類別名稱，例如：生物">
       <button id="addCategoryBtn">新增類別</button>
@@ -298,14 +354,14 @@
     <button id="refreshBtn">重新整理</button>
 
     <hr class="divider">
-    <label for="file">上傳筆記 (.txt / .md / 圖片 / PDF)</label>
+    <label class="title" for="file">上傳筆記 (.txt / .md / 圖片 / PDF)</label>
     <input type="file" id="file" accept=".txt,.md,.jpg,.jpeg,.png,.webp,.gif,.pdf">
     <div class="model-row">
       <label for="uploadCategory">放入類別</label>
       <select id="uploadCategory"><option value="">未分類</option></select>
     </div>
     <div><button id="uploadBtn">上傳</button></div>
-    <div id="uploadResult" class="muted"></div>
+    <div id="uploadResult" class="muted" role="status"></div>
   </section>
 
   <script>
@@ -409,6 +465,7 @@
     // the UI usable when the backend is asleep can't cause an invalid model to be used
     // — an unknown id simply falls back to the server default.
     const FALLBACK_MODELS = [
+      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
       { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
       { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
       { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
@@ -558,12 +615,18 @@
       if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
     }
 
+    // `state` is "", "pending" or "error": waiting and failing are styled apart from an answer.
+    function setAnswer(text, state = "") {
+      $("answer").className = state;
+      $("answer").textContent = text;
+    }
+
     async function ask() {
       const question = $("question").value.trim();
       if (!question) return;
-      if (!userId()) { $("answer").textContent = "請先使用 Google 登入。"; return; }
+      if (!userId()) { setAnswer("請先使用 Google 登入。", "error"); return; }
       $("askBtn").disabled = true;
-      $("answer").textContent = "思考中…";
+      setAnswer("思考中…", "pending");
       try {
         const res = await api("/api/query", {
           method: "POST",
@@ -574,10 +637,10 @@
                                  category: $("askCategory").value || null }),
         });
         const data = await res.json();
-        if (res.ok) { renderAnswer($("answer"), data); }
-        else { $("answer").textContent = "錯誤：" + errText(data, res); }
+        if (res.ok) { $("answer").className = ""; renderAnswer($("answer"), data); }
+        else { setAnswer("錯誤：" + errText(data, res), "error"); }
       } catch (e) {
-        $("answer").textContent = "請求失敗：" + e;
+        setAnswer("請求失敗：" + e, "error");
       } finally {
         $("askBtn").disabled = false;
       }
@@ -855,6 +918,11 @@
       box.appendChild(categoryGroup(null, notes.filter(n => !known.has(n.category))));
     }
 
+    const GRIP_ICON = '<svg viewBox="0 0 10 16" width="10" height="16" aria-hidden="true" fill="currentColor">'
+      + [3, 8, 13].map(y => `<circle cx="2" cy="${y}" r="1.3"/><circle cx="8" cy="${y}" r="1.3"/>`).join("")
+      + "</svg>";
+    const TYPE_LABEL = { text: "文字", image: "圖片", pdf: "PDF" };
+
     // One note row: drag handle, name and preview, actions.
     function noteRow(n) {
       const li = document.createElement("li");
@@ -862,7 +930,7 @@
       // The handle, not the whole row, is draggable: a draggable row would swallow text
       // selection inside an open editor.
       const grip = Object.assign(document.createElement("span"),
-        { className: "grip", textContent: "⠿", title: "拖曳到其他類別", draggable: writable });
+        { className: "grip", innerHTML: GRIP_ICON, title: "拖曳到其他類別", draggable: writable });
       grip.addEventListener("dragstart", (ev) => {
         ev.dataTransfer.setData("text/x-note-id", n.id);
         ev.dataTransfer.setData("text/x-note-category", n.category || "");
@@ -874,11 +942,15 @@
       li.appendChild(grip);
       const meta = document.createElement("span");
       meta.className = "meta";
-      const tag = document.createElement("span");
-      tag.textContent = `[${n.type}] ${n.id} — `;
+      const tag = Object.assign(document.createElement("span"),
+        { className: "note-type", textContent: TYPE_LABEL[n.type] || n.type });
+      const name = Object.assign(document.createElement("span"),
+        { className: "note-name", textContent: n.id });
       const preview = document.createElement("span");
+      preview.className = "note-preview";
       renderInline(preview, n.preview);
       meta.appendChild(tag);
+      meta.appendChild(name);
       meta.appendChild(preview);
       const actions = document.createElement("div");
       actions.className = "note-actions";
@@ -1273,7 +1345,7 @@
     function setUser(label) {
       setStatus(label);
       $("signoutLink").style.display = "";
-      $("answer").textContent = "";
+      setAnswer("");
       $("uploadResult").textContent = "";
       loadNotes();
     }
