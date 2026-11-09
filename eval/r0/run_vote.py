@@ -114,6 +114,8 @@ def score(out: Path, n: int) -> list:
     single = [Counter() for _ in range(n)]
     for p in PAGES:
         ref = text_only(gold[p])
+        base = text_only(model_body((HERE / "results" / "baseline" / "transcripts" / f"R0_p{p}.md").read_text(encoding="utf-8")))
+        tot["base"] += sum(edit_counts(ref, base)[:2])
         reads = [text_only(model_body((out / "reads" / f"R0_p{p}_{k}.md").read_text(encoding="utf-8")))
                  for k in range(1, n + 1)]
         voted, pivot, flags = vote(reads)
@@ -140,7 +142,7 @@ def score(out: Path, n: int) -> list:
     return [
         "## 辨識層", "",
         "| | 漏/錯字 | 比例 |", "|---|---|---|",
-        f"| Gemini 單次讀（溫度 0，baseline） | 16/916 | 1.7% |",
+        f"| Gemini 單次讀（溫度 0，baseline） | {tot['base']}/{N} | {tot['base'] / N:.1%} |",
         f"| 單次讀（本次溫度，5 次各自） | {'、'.join(map(str, singles))} / {N} | "
         f"{min(singles) / N:.1%}–{max(singles) / N:.1%} |",
         f"| **投票後** | {tot['voted']}/{N} | **{tot['voted'] / N:.1%}** |", "",

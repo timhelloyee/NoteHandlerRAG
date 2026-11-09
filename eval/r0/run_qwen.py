@@ -114,7 +114,7 @@ def score(run: Path):
         "## 「Gemini 和 Qwen 不一致＝可疑」當自動找錯工具（找 Gemini 的錯）", "",
         f"- 被標記可疑 {tp + fp} 字，其中 Gemini 真的讀錯 {tp} 字 → 精確率 **{tp / max(tp + fp, 1):.0%}**",
         f"- Gemini 真的讀錯 {tp + fn} 字，其中被標記 {tp} 字 → 召回率 **{tp / max(tp + fn, 1):.0%}**",
-        "- 對照：Gemini 自己讀 5 次投票是精確率 18%、召回率 36%（vote_t07）", "",
+        "- 對照：Gemini 自己讀 5 次投票的找錯能力見 vote_t07/vote.md", "",
     ] + vote_score(run, meta["n"])
     (run / "score.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     print("\n".join(report))
