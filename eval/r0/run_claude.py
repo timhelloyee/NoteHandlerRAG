@@ -27,26 +27,41 @@ from run_vote import PAGES, detection, vote, wrong_positions  # noqa: E402
 from score import edit_counts, gold_text_sections, model_body, text_only  # noqa: E402
 
 
-def read_all(out: Path, model: str, effort: str, prompt: str):
+def app_prompt() -> str:
+    """The app's image prompt, cut from describe_image() as run_qwen.bundle does."""
+    src = (HERE.parent.parent / "app" / "rag_core.py").read_text(encoding="utf-8")
+    return re.search(r'prompt = """(.*?)"""', src[src.index("def describe_image"):], re.S).group(1).replace("\\\\", "\\")
+
+
+def client():
     import anthropic
     from dotenv import load_dotenv
     load_dotenv(HERE.parent.parent / ".env")
-    client = anthropic.Anthropic()
+    return anthropic.Anthropic()
+
+
+def read_image(c, model: str, effort: str, prompt: str, jpeg: bytes) -> tuple:
+    """(text, usage dict) for one image."""
+    r = c.messages.create(
+        model=model, max_tokens=16000, output_config={"effort": effort},
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                         "data": base64.standard_b64encode(jpeg).decode()}},
+            {"type": "text", "text": prompt}]}])
+    return ("".join(b.text for b in r.content if b.type == "text"),
+            {"input": r.usage.input_tokens, "output": r.usage.output_tokens, "stop": r.stop_reason})
+
+
+def read_all(out: Path, model: str, effort: str, prompt: str):
+    c = client()
     (out / "transcripts").mkdir(parents=True, exist_ok=True)
     usage = {}
     for p in PAGES:
         f = out / "transcripts" / f"R0_p{p}.md"
         if f.is_file():                              # resumable
             continue
-        img = base64.standard_b64encode((HERE / f"R0_p{p}.jpg").read_bytes()).decode()
-        r = client.messages.create(
-            model=model, max_tokens=16000, output_config={"effort": effort},
-            messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img}},
-                {"type": "text", "text": prompt}]}])
-        text = "".join(b.text for b in r.content if b.type == "text")
-        usage[p] = {"input": r.usage.input_tokens, "output": r.usage.output_tokens, "stop": r.stop_reason}
-        print(f"p{p}: {r.stop_reason}, in {r.usage.input_tokens}, out {r.usage.output_tokens}", flush=True)
+        text, usage[p] = read_image(c, model, effort, prompt, (HERE / f"R0_p{p}.jpg").read_bytes())
+        print(f"p{p}: {usage[p]}", flush=True)
         f.write_text(text, encoding="utf-8")
     return usage
 
@@ -98,8 +113,7 @@ def main():
     args = ap.parse_args()
     out = Path(args.out)
     if not args.score_only:
-        src = (HERE.parent.parent / "app" / "rag_core.py").read_text(encoding="utf-8")   # as run_qwen.bundle
-        prompt = re.search(r'prompt = """(.*?)"""', src[src.index("def describe_image"):], re.S).group(1).replace("\\\\", "\\")
+        prompt = app_prompt()
         old = out / "meta.json"
         usage = json.loads(old.read_text(encoding="utf-8"))["usage"] if old.is_file() else {}
         usage.update(read_all(out, args.model, args.effort, prompt))

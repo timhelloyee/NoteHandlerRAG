@@ -39,14 +39,17 @@ def main(runs: list):
             sm = difflib.SequenceMatcher(None, ref, hyp, autojunk=False)
             errs += [f"p{p} {ref[i1:i2]}→{hyp[j1:j2] or '∅'}" for op, i1, i2, j1, j2 in sm.get_opcodes()
                      if op in ("replace", "delete") and i2 - i1 <= 4 and j2 - j1 <= 6]
-        ans = notehandler_answers(d)
-        ok = sum(score_answer(*ans[q], keys[q], q.startswith("D"))["verdict"] == "正確" for q in keys)
-        wrong = [q for q in keys if score_answer(*ans[q], keys[q], q.startswith("D"))["verdict"] != "正確"]
-        gr = [g.check(ans[q][0], subj[q]) for q in keys]
-        out = sum(r["outside_chars"] for r in gr) / max(sum(r["chars"] for r in gr), 1)
-        rel = sum(len(r["relations"]) for r in gr)
+        answer_cells = "| — | — | — | — |"            # recognition-only runs ask no questions
+        if (d / "answers.json").is_file():
+            ans = notehandler_answers(d)
+            ok = sum(score_answer(*ans[q], keys[q], q.startswith("D"))["verdict"] == "正確" for q in keys)
+            wrong = [q for q in keys if score_answer(*ans[q], keys[q], q.startswith("D"))["verdict"] != "正確"]
+            gr = [g.check(ans[q][0], subj[q]) for q in keys]
+            out = sum(r["outside_chars"] for r in gr) / max(sum(r["chars"] for r in gr), 1)
+            rel = sum(len(r["relations"]) for r in gr)
+            answer_cells = f"| {ok}/23 | {'、'.join(wrong) or '—'} | {rel} | {out:.1%} |"
         rows.append(f"| {run} | {meta['model']} | `{meta['prompt_sha256'][:8]}` | {s + dl}/{n}（{(s + dl) / n:.1%}） "
-                    f"| {ok}/23 | {'、'.join(wrong) or '—'} | {rel} | {out:.1%} |")
+                    + answer_cells)
         misreads.append(f"- **{run}**：" + "；".join(errs))
 
     print("| 執行 | 模型 | 提示詞 | 漏/錯字 | 答案正確 | 答錯的題 | 錯誤關係 | 筆記外用詞 |")

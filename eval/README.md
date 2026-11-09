@@ -19,6 +19,9 @@ without user correction, against NotebookLM** (see `handoff/實驗架構.md` and
 | `r0/judge_test.py` | Rule-built test answers (gold, look-alike swaps, cut facts) to compare an LLM judge with the mechanical verdicts | yes |
 | `r0/confusable_flag.py` | Mines look-alike character pairs from G0 and tests them as a misread flag on R0 | yes |
 | `r0/ping_gemini.py` | Pings gemini-3.7/3.8-flash from a UserPromptSubmit hook; wakes Claude to run R0 when one answers | yes |
+| `r0/run_tiles.py` | Cuts each page into bands at blank rows, enlarges and reads each band alone, joins the readings | yes |
+| `r0/sinica_freq.py` / `r0/classify_errors.py` | Word counts from the Academia Sinica Balanced Corpus online search (cached); rule-based class for every misread | yes |
+| `r0/compare_ngram.py` / `r0/compare_wordfreq.py` | The same word pairs in Google Books Ngram (Simplified Chinese) and in wordfreq | yes |
 | `r0/*.jpg` / `r0/results/<run>/` | Scans of the handwritten pages; per run: transcripts, answers, `meta.json` (model, prompts, commit), `score.md` | no |
 | `g0/transcripts/` | 66 pages of hand-corrected transcripts of the author's real notes — the gold standard for character error rate (G0/G1) | no (note content) |
 | `g0/baseline_gemini_whole_page.json` | The same pages as Gemini read them whole-page, before any correction — the starting point of the G1 ablation | no (note content) |
