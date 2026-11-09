@@ -46,7 +46,12 @@ gemini_api_key_secondary = os.environ["GEMINI_API_KEY_SECONDARY"]
 _LLM_KEY_ORDER = [gemini_api_key_primary, gemini_api_key_secondary]
 _VISION_KEY_ORDER = [gemini_api_key_secondary, gemini_api_key_primary]
 
-_vision_clients = [genai.Client(api_key=k) for k in _VISION_KEY_ORDER]
+# Without a timeout a request the server never answers blocks forever and the other
+# key is never tried. A slow vision page takes well under this.
+REQUEST_TIMEOUT_S = 120
+
+_vision_clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_S * 1000))
+                   for k in _VISION_KEY_ORDER]
 
 # --- selectable models --------------------------------------------------------
 # Ids verified against the live models.list() endpoint — note 3 Flash exists only as
@@ -84,6 +89,7 @@ def _get_llm(model: str, key_index: int) -> ChatGoogleGenerativeAI:
             model=model,
             temperature=0,
             max_retries=2,
+            timeout=REQUEST_TIMEOUT_S,
             google_api_key=_LLM_KEY_ORDER[key_index],
         )
         _llm_cache[(model, key_index)] = cached
@@ -107,8 +113,9 @@ def _is_quota_error(exc: Exception) -> bool:
 
 def _is_transient_error(exc: Exception) -> bool:
     """True for upstream hiccups worth retrying: 503 overload, 500 internal, timeouts.
-    Popular models return 503 'high demand' at busy times — that is not our bug."""
-    text = str(exc).upper()
+    Popular models return 503 'high demand' at busy times — that is not our bug.
+    The type name is included: a client timeout (httpx ReadTimeout) says only 'timed out'."""
+    text = f"{type(exc).__name__} {exc}".upper()
     return any(
         s in text
         for s in ("UNAVAILABLE", "503", "OVERLOADED", "INTERNAL", "500 ", "DEADLINE", "TIMEOUT")
